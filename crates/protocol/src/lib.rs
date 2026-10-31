@@ -9,6 +9,9 @@ pub mod ipc;
 pub mod models;
 pub mod paths;
 
-pub use config::{Config, Language, PlaybackConfig, Quality};
+pub use config::{
+    ApiConfig, CacheConfig, Config, Language, LogConfig, PlaybackConfig, Quality, UiConfig,
+};
+pub use ipc::*;
 pub use models::*;
 pub use paths::Paths;

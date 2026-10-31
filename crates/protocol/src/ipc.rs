@@ -163,8 +163,8 @@ impl ErrorInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Playback(PlaybackState),
-    Queue(QueueSnapshot),
+    Playback(Box<PlaybackState>),
+    Queue(Box<QueueSnapshot>),
     Auth(AuthState),
     Notice(Notice),
     Shutdown,

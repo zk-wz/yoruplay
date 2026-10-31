@@ -280,21 +280,15 @@ impl PlayMode {
         matches!(self, PlayMode::Shuffle)
     }
 
-    pub fn from_mpris(loop_status: Option<&str>, shuffle: Option<bool>, previous: Self) -> Self {
+    pub fn from_mpris(loop_status: Option<&str>, shuffle: Option<bool>, _previous: Self) -> Self {
         if shuffle == Some(true) {
             return PlayMode::Shuffle;
         }
         match loop_status {
             Some("Track") => PlayMode::TrackLoop,
             Some("Playlist") => PlayMode::ListLoop,
-            Some("None") => {
-                if previous == PlayMode::Shuffle {
-                    PlayMode::Sequential
-                } else {
-                    PlayMode::Sequential
-                }
-            }
-            _ => previous,
+            Some("None") => PlayMode::Sequential,
+            _ => _previous,
         }
     }
 }
