@@ -536,6 +536,20 @@ mod tests {
         mpv.set_volume(0.25).await.unwrap();
         let volume = mpv.get_property("volume").await.unwrap();
         assert_eq!(volume, json!(25.0));
+        mpv.set_loop_file(true).await.unwrap();
+        assert_eq!(mpv.get_property("loop-file").await.unwrap(), json!("inf"));
+        mpv.seek_ms(500).await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+        let position = mpv
+            .get_property("time-pos")
+            .await
+            .unwrap()
+            .as_f64()
+            .unwrap_or(0.0);
+        assert!(
+            (position - 0.5).abs() < 0.25,
+            "unexpected position {position}"
+        );
         mpv.stop().await.unwrap();
         mpv.shutdown().await;
         assert!(!socket.exists());

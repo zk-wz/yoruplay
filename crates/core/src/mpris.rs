@@ -112,7 +112,7 @@ impl MprisRoot {
         false
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     fn fullscreen(&self) -> bool {
         false
     }
@@ -197,7 +197,7 @@ impl MprisPlayer {
         self.daemon.playback().await.status.mpris().to_string()
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     async fn loop_status(&self) -> String {
         self.daemon
             .playback()
@@ -234,7 +234,7 @@ impl MprisPlayer {
         1.0
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     async fn shuffle(&self) -> bool {
         self.daemon.playback().await.mode.mpris_shuffle()
     }
@@ -259,7 +259,7 @@ impl MprisPlayer {
         metadata_for(playback.current.as_ref(), lyrics.as_deref())
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     async fn volume(&self) -> f64 {
         self.daemon.playback().await.volume
     }

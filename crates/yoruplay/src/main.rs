@@ -684,7 +684,6 @@ fn service_install(paths: &Paths) -> Result<()> {
     let unit = format!(
         r#"[Unit]
 Description=YoruPlay background music service
-Documentation=https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
 After=pipewire-pulse.service wireplumber.service
 Wants=pipewire-pulse.service
 

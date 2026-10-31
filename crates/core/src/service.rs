@@ -213,20 +213,20 @@ impl Daemon {
                     mode = state.mode;
                     if !state.queue.is_empty() {
                         queue.replace(state.queue, state.current.unwrap_or(0), state.source);
-                        if let Err(e) = queue.set_mode(state.mode) {
-                            warnings.push(format!(
-                                "Could not restore mode {}: {e}; using list repeat.",
-                                state.mode.label()
-                            ));
-                            let _ = queue.set_mode(PlayMode::ListLoop);
-                        }
                         duration_ms = queue
                             .current()
                             .map(|item| item.song.duration_ms)
                             .unwrap_or(0);
                         position_ms = state.position_ms.min(duration_ms);
-                        restored = true;
                     }
+                    if let Err(e) = queue.set_mode(state.mode) {
+                        warnings.push(format!(
+                            "Could not restore mode {}: {e}; using list repeat.",
+                            state.mode.label()
+                        ));
+                        let _ = queue.set_mode(PlayMode::ListLoop);
+                    }
+                    restored = true;
                 }
                 Ok(None) => {}
                 Err(e) => warnings.push(format!("Ignoring playback state: {e}")),
@@ -826,7 +826,21 @@ impl Daemon {
         let generation = self.next_generation();
         {
             let mut state = self.inner.state.write().await;
+            let heart = state.queue.mode() == PlayMode::Intelligence;
+            if heart {
+                let context = state
+                    .queue
+                    .items()
+                    .get(index)
+                    .and_then(|item| item.context.clone())
+                    .ok_or(ServiceError::Queue(QueueError::HeartbeatRequiresContext))?;
+                let _ = context;
+            }
             state.queue.jump_to(index)?;
+            if heart {
+                // Re-seed Heartbeat from the manually selected context track.
+                state.queue.set_mode(PlayMode::Intelligence)?;
+            }
             state.status = PlaybackStatus::Buffering;
             state.clear_track_transient();
             state.sync_current_metadata(true);

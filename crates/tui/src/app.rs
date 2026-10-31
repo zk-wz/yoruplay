@@ -598,8 +598,21 @@ impl App {
                     }
                     Err(error) => {
                         self.status_error(error);
-                        if let Detail::Search { loading_more, .. } = &mut self.detail {
+                        if let Detail::Search {
+                            query,
+                            kind,
+                            page,
+                            selected,
+                            loading_more,
+                            has_more,
+                        } = &mut self.detail
+                        {
+                            if page.is_none() {
+                                *page = Some(empty_search_page(query, *kind));
+                                *selected = 0;
+                            }
                             *loading_more = false;
+                            *has_more = page.as_ref().is_some_and(|p| p.has_more);
                         }
                     }
                     _ => {}
@@ -1475,6 +1488,23 @@ impl App {
             },
         );
         self.dirty = true;
+    }
+}
+
+fn empty_search_page(query: &str, kind: SearchKind) -> SearchPage {
+    let items = match kind {
+        SearchKind::Songs => SearchItems::Songs(Vec::new()),
+        SearchKind::Artists => SearchItems::Artists(Vec::new()),
+        SearchKind::Albums => SearchItems::Albums(Vec::new()),
+        SearchKind::Playlists => SearchItems::Playlists(Vec::new()),
+    };
+    SearchPage {
+        query: query.to_string(),
+        offset: 0,
+        limit: 0,
+        total: 0,
+        has_more: false,
+        items,
     }
 }
 

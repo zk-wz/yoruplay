@@ -54,6 +54,13 @@ cargo build --release
 install -Dm755 target/release/yoruplay ~/.local/bin/yoruplay
 ```
 
+Or use the helper, which checks mpv, installs the binary and writes the user
+unit (without enabling it):
+
+```sh
+./scripts/install.sh
+```
+
 `Cargo.lock` is committed. `cargo fmt --check`, `cargo clippy` and `cargo test`
 must pass before a release build.
 
@@ -314,6 +321,9 @@ generated silent WAV; normal playback uses `--ao=pulse`.
 - [`docs/development.md`](docs/development.md)
 - [`docs/resource-usage.md`](docs/resource-usage.md)
 - [`docs/known-issues.md`](docs/known-issues.md)
+
+`scripts/measure-pss.sh [pid...]` prints PSS/RSS/threads/CPU for the daemon, TUI
+and any passed mpv PID.
 
 The NetEase API implementation is a selective native Rust port of
 NeteaseCloudMusicApiEnhanced/api-enhanced (MIT). The upstream checkout under

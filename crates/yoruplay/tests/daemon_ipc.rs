@@ -187,3 +187,73 @@ async fn empty_queue_commands_are_clear_errors() {
     client.close().await;
     daemon.shutdown().await;
 }
+
+async fn spawn_daemon_for(root: &Path, paths: &yoruplay_protocol::Paths) -> Child {
+    let exe = env!("CARGO_BIN_EXE_yoruplay");
+    let child = ProcessCommand::new(exe)
+        .arg("daemon")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent-yoruplay-bus",
+        )
+        .env("RUST_LOG", "warn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn daemon");
+    for _ in 0..100 {
+        if IpcClient::connect(paths.socket_file()).await.is_ok() {
+            return child;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!("daemon did not become ready");
+}
+
+#[tokio::test]
+async fn volume_and_mode_survive_daemon_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let paths = yoruplay_protocol::Paths {
+        config_dir: root.join("config/yoruplay"),
+        data_dir: root.join("data/yoruplay"),
+        cache_dir: root.join("cache/yoruplay"),
+        runtime_dir: root.join("run/yoruplay"),
+    };
+    paths.ensure_dirs().unwrap();
+    std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = spawn_daemon_for(root, &paths).await;
+    let client = IpcClient::connect(paths.socket_file()).await.unwrap();
+    client
+        .request(Command::SetVolume { volume: 0.21 })
+        .await
+        .unwrap();
+    client
+        .request(Command::SetMode {
+            mode: PlayMode::Shuffle,
+        })
+        .await
+        .unwrap();
+    client.request(Command::Shutdown).await.unwrap();
+    client.close().await;
+    let _ = timeout(Duration::from_secs(5), child.wait()).await;
+
+    let mut child = spawn_daemon_for(root, &paths).await;
+    let client = IpcClient::connect(paths.socket_file()).await.unwrap();
+    let result = client.request(Command::GetState).await.unwrap();
+    let CommandResult::State(snapshot) = result else {
+        panic!("unexpected state");
+    };
+    assert!((snapshot.playback.volume - 0.21).abs() < 0.001);
+    assert_eq!(snapshot.playback.mode, PlayMode::Shuffle);
+    client.request(Command::Shutdown).await.unwrap();
+    client.close().await;
+    let _ = timeout(Duration::from_secs(5), child.wait()).await;
+}
