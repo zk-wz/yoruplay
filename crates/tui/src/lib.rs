@@ -1,0 +1,1 @@
+//! YoruPlay terminal interface.

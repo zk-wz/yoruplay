@@ -1,0 +1,14 @@
+[package]
+name = "yoruplay-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared models, configuration and IPC contract for YoruPlay"
+
+[dependencies]
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
