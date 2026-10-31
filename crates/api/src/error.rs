@@ -13,7 +13,11 @@ pub enum ApiError {
     #[error("invalid response from {endpoint}: {message}")]
     Decode { endpoint: String, message: String },
     #[error("NetEase API error {code}: {message}")]
-    Api { code: i64, message: String, endpoint: String },
+    Api {
+        code: i64,
+        message: String,
+        endpoint: String,
+    },
     #[error("login is required")]
     AuthRequired,
     #[error("the NetEase session has expired")]
@@ -104,6 +108,10 @@ impl ApiError {
     pub fn into_error_info(self) -> ErrorInfo {
         let code = self.code();
         let hint = self.hint().map(str::to_string);
-        ErrorInfo { code: code.into(), message: self.user_message(), hint }
+        ErrorInfo {
+            code: code.into(),
+            message: self.user_message(),
+            hint,
+        }
     }
 }

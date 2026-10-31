@@ -168,7 +168,11 @@ impl SessionData {
     pub fn auth_state(&self) -> AuthState {
         AuthState {
             logged_in: self.logged_in() && !self.expired,
-            profile: if self.expired { None } else { self.profile.clone() },
+            profile: if self.expired {
+                None
+            } else {
+                self.profile.clone()
+            },
             session_expired: self.expired,
         }
     }
@@ -219,7 +223,9 @@ impl SessionData {
             return Err(ApiError::InvalidCookie("empty cookie string".into()));
         }
         if !self.logged_in() {
-            return Err(ApiError::InvalidCookie("cookie does not contain MUSIC_U".into()));
+            return Err(ApiError::InvalidCookie(
+                "cookie does not contain MUSIC_U".into(),
+            ));
         }
         self.expired = false;
         Ok(())
@@ -260,8 +266,8 @@ impl SessionData {
             cookies: self.cookies.clone(),
             profile: self.profile.clone(),
         };
-        let text = serde_json::to_vec_pretty(&stored)
-            .map_err(|e| ApiError::SessionIo(e.to_string()))?;
+        let text =
+            serde_json::to_vec_pretty(&stored).map_err(|e| ApiError::SessionIo(e.to_string()))?;
         let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -270,8 +276,10 @@ impl SessionData {
             .mode(0o600)
             .open(&tmp)
             .map_err(|e| ApiError::SessionIo(e.to_string()))?;
-        file.write_all(&text).map_err(|e| ApiError::SessionIo(e.to_string()))?;
-        file.sync_all().map_err(|e| ApiError::SessionIo(e.to_string()))?;
+        file.write_all(&text)
+            .map_err(|e| ApiError::SessionIo(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| ApiError::SessionIo(e.to_string()))?;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
             .map_err(|e| ApiError::SessionIo(e.to_string()))?;
         fs::rename(&tmp, path).map_err(|e| ApiError::SessionIo(e.to_string()))?;
@@ -378,7 +386,9 @@ pub fn parse_set_cookie(value: &str) -> Option<(String, String)> {
 }
 
 fn random_hex<R: Rng>(rng: &mut R, n: usize) -> String {
-    (0..n).map(|_| format!("{:x}", rng.gen_range(0..16))).collect()
+    (0..n)
+        .map(|_| format!("{:x}", rng.gen_range(0..16)))
+        .collect()
 }
 
 fn random_letters<R: Rng>(rng: &mut R, n: usize) -> String {
@@ -433,7 +443,8 @@ mod tests {
     fn imports_cookie_and_rejects_missing_music_u() {
         let mut s = SessionData::anonymous(None);
         assert!(s.import_cookie_string("a=b").is_err());
-        s.import_cookie_string("MUSIC_U=secret; __csrf=token").unwrap();
+        s.import_cookie_string("MUSIC_U=secret; __csrf=token")
+            .unwrap();
         assert!(s.logged_in());
         assert_eq!(s.csrf(), "token");
     }
@@ -442,7 +453,8 @@ mod tests {
     fn persists_with_private_permissions_and_loads() {
         let path = temp_path("persist.json");
         let mut s = SessionData::anonymous(Some(path.clone()));
-        s.import_cookie_string("MUSIC_U=secret; __csrf=token").unwrap();
+        s.import_cookie_string("MUSIC_U=secret; __csrf=token")
+            .unwrap();
         s.set_profile(UserProfile {
             user_id: 7,
             nickname: "tester".into(),
@@ -463,7 +475,8 @@ mod tests {
     #[test]
     fn debug_does_not_leak_cookie() {
         let mut s = SessionData::anonymous(None);
-        s.import_cookie_string("MUSIC_U=super-secret-token").unwrap();
+        s.import_cookie_string("MUSIC_U=super-secret-token")
+            .unwrap();
         let text = format!("{s:?}");
         assert!(!text.contains("super-secret-token"));
         assert!(text.contains("logged_in: true"));

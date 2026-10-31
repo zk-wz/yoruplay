@@ -45,7 +45,10 @@ pub struct ApiConfig {
 
 impl Default for ApiConfig {
     fn default() -> Self {
-        Self { quality: Quality::Exhigh, timeout_secs: 15 }
+        Self {
+            quality: Quality::Exhigh,
+            timeout_secs: 15,
+        }
     }
 }
 
@@ -57,7 +60,9 @@ pub struct UiConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { language: Language::En }
+        Self {
+            language: Language::En,
+        }
     }
 }
 
@@ -71,7 +76,11 @@ pub struct PlaybackConfig {
 
 impl Default for PlaybackConfig {
     fn default() -> Self {
-        Self { default_mode: PlayMode::ListLoop, volume: 0.7, restore_queue: true }
+        Self {
+            default_mode: PlayMode::ListLoop,
+            volume: 0.7,
+            restore_queue: true,
+        }
     }
 }
 
@@ -84,7 +93,10 @@ pub struct CacheConfig {
 
 impl Default for CacheConfig {
     fn default() -> Self {
-        Self { max_mb: 32, lyrics_ttl_hours: 24 * 30 }
+        Self {
+            max_mb: 32,
+            lyrics_ttl_hours: 24 * 30,
+        }
     }
 }
 
@@ -96,7 +108,9 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: "info".into() }
+        Self {
+            level: "info".into(),
+        }
     }
 }
 
@@ -174,7 +188,10 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("yoruplay-config-test-{}-{name}", std::process::id()));
+        p.push(format!(
+            "yoruplay-config-test-{}-{name}",
+            std::process::id()
+        ));
         let _ = fs::remove_file(&p);
         p
     }

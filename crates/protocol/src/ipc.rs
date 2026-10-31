@@ -9,7 +9,7 @@ use crate::models::{
 /// with a different version are rejected with a readable error.
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Refuse absurd frames before attempting to allocate/deserialize them.
-pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,11 +36,17 @@ pub enum Command {
     Shutdown,
 
     LoginQrStart,
-    LoginQrPoll { key: String },
-    ImportCookie { cookie: String },
+    LoginQrPoll {
+        key: String,
+    },
+    ImportCookie {
+        cookie: String,
+    },
     Logout,
 
-    Playlists { kind: PlaylistKind },
+    Playlists {
+        kind: PlaylistKind,
+    },
     LikedSongs,
     RecentSongs,
     PlaylistTracks {
@@ -50,9 +56,18 @@ pub enum Command {
         #[serde(default = "default_page_limit")]
         limit: usize,
     },
-    DailySongs,
-    DailyPlaylists,
-    Radar,
+    DailySongs {
+        #[serde(default)]
+        refresh: bool,
+    },
+    DailyPlaylists {
+        #[serde(default)]
+        refresh: bool,
+    },
+    Radar {
+        #[serde(default)]
+        refresh: bool,
+    },
     PersonalFm,
     Search {
         query: String,
@@ -62,8 +77,16 @@ pub enum Command {
         #[serde(default = "default_page_limit")]
         limit: usize,
     },
-    ArtistSongs { id: u64, #[serde(default)] offset: usize, #[serde(default = "default_page_limit")] limit: usize },
-    AlbumSongs { id: u64 },
+    ArtistSongs {
+        id: u64,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_page_limit")]
+        limit: usize,
+    },
+    AlbumSongs {
+        id: u64,
+    },
 
     PlaySongs {
         songs: Vec<Song>,
@@ -85,9 +108,16 @@ pub enum Command {
         #[serde(default)]
         context: Option<PlaylistRef>,
     },
-    AddPlaylist { id: u64 },
-    QueueRemove { index: usize },
+    AddPlaylist {
+        id: u64,
+    },
+    QueueRemove {
+        index: usize,
+    },
     QueueClear,
+    QueuePlay {
+        index: usize,
+    },
 
     Play,
     Pause,
@@ -95,10 +125,18 @@ pub enum Command {
     Next,
     Previous,
     Stop,
-    SeekRelative { offset_ms: i64 },
-    SetPosition { position_ms: u64 },
-    SetVolume { volume: f64 },
-    SetMode { mode: PlayMode },
+    SeekRelative {
+        offset_ms: i64,
+    },
+    SetPosition {
+        position_ms: u64,
+    },
+    SetVolume {
+        volume: f64,
+    },
+    SetMode {
+        mode: PlayMode,
+    },
     CycleMode,
     RefreshCurrent,
     ClearCache,
@@ -134,7 +172,9 @@ impl CommandResult {
     }
 
     pub fn ack_msg(message: impl Into<String>) -> Self {
-        CommandResult::Ack { message: Some(message.into()) }
+        CommandResult::Ack {
+            message: Some(message.into()),
+        }
     }
 }
 
@@ -151,7 +191,11 @@ pub struct ErrorInfo {
 
 impl ErrorInfo {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), hint: None }
+        Self {
+            code: code.into(),
+            message: message.into(),
+            hint: None,
+        }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
@@ -180,7 +224,10 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    Hello { version: u32, daemon_version: String },
+    Hello {
+        version: u32,
+        daemon_version: String,
+    },
     Response {
         id: u64,
         #[serde(default)]
@@ -188,16 +235,26 @@ pub enum ServerMessage {
         #[serde(default)]
         error: Option<ErrorInfo>,
     },
-    Event { event: Event },
+    Event {
+        event: Event,
+    },
 }
 
 impl ServerMessage {
     pub fn ok(id: u64, result: CommandResult) -> Self {
-        ServerMessage::Response { id, result: Some(result), error: None }
+        ServerMessage::Response {
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn err(id: u64, error: ErrorInfo) -> Self {
-        ServerMessage::Response { id, result: None, error: Some(error) }
+        ServerMessage::Response {
+            id,
+            result: None,
+            error: Some(error),
+        }
     }
 }
 
@@ -210,7 +267,9 @@ mod tests {
     fn request_roundtrip_preserves_command() {
         let msg = ClientMessage::Request {
             id: 42,
-            command: Command::SetMode { mode: PlayMode::Intelligence },
+            command: Command::SetMode {
+                mode: PlayMode::Intelligence,
+            },
         };
         let line = serde_json::to_string(&msg).unwrap();
         assert!(line.contains("\"cmd\":\"set_mode\""));
@@ -236,7 +295,10 @@ mod tests {
         )
         .unwrap();
         match msg {
-            ClientMessage::Request { command: Command::PlaylistTracks { offset, limit, .. }, .. } => {
+            ClientMessage::Request {
+                command: Command::PlaylistTracks { offset, limit, .. },
+                ..
+            } => {
                 assert_eq!(offset, 0);
                 assert_eq!(limit, 100);
             }

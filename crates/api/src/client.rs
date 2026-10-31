@@ -43,7 +43,10 @@ pub struct Endpoints {
 
 impl Default for Endpoints {
     fn default() -> Self {
-        Self { weapi: WEAPI_HOST.into(), eapi: EAPI_HOST.into() }
+        Self {
+            weapi: WEAPI_HOST.into(),
+            eapi: EAPI_HOST.into(),
+        }
     }
 }
 
@@ -58,7 +61,7 @@ pub struct StreamUrl {
     pub trial: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Lyrics {
     pub lrc: String,
     pub translated: Option<String>,
@@ -168,16 +171,23 @@ impl NeteaseClient {
                     let header = session.eapi_header(&request_id);
                     object_map.insert(
                         "header".into(),
-                        Value::Object(header.into_iter().map(|(k, v)| (k, Value::String(v))).collect()),
+                        Value::Object(
+                            header
+                                .into_iter()
+                                .map(|(k, v)| (k, Value::String(v)))
+                                .collect(),
+                        ),
                     );
-                    let text = serde_json::to_string(&object)
-                        .map_err(|e| ApiError::Decode {
-                            endpoint: path.into(),
-                            message: e.to_string(),
-                        })?;
+                    let text = serde_json::to_string(&object).map_err(|e| ApiError::Decode {
+                        endpoint: path.into(),
+                        message: e.to_string(),
+                    })?;
                     let params = eapi_encrypt(path, &text);
                     (
-                        format!("{}/eapi/{endpoint_path}", self.endpoints.eapi.trim_end_matches('/')),
+                        format!(
+                            "{}/eapi/{endpoint_path}",
+                            self.endpoints.eapi.trim_end_matches('/')
+                        ),
                         vec![("params".to_string(), params)],
                         session.cookie_header(),
                         EAPI_UA,
@@ -190,15 +200,17 @@ impl NeteaseClient {
                         ApiError::InvalidArgument("weapi payload must be a JSON object".into())
                     })?;
                     object_map.insert("csrf_token".into(), Value::String(session.csrf()));
-                    let text = serde_json::to_string(&object)
-                        .map_err(|e| ApiError::Decode {
-                            endpoint: path.into(),
-                            message: e.to_string(),
-                        })?;
+                    let text = serde_json::to_string(&object).map_err(|e| ApiError::Decode {
+                        endpoint: path.into(),
+                        message: e.to_string(),
+                    })?;
                     let secret = random_weapi_secret();
                     let (params, enc_sec_key) = weapi_encrypt(&text, &secret)?;
                     (
-                        format!("{}/weapi/{endpoint_path}", self.endpoints.weapi.trim_end_matches('/')),
+                        format!(
+                            "{}/weapi/{endpoint_path}",
+                            self.endpoints.weapi.trim_end_matches('/')
+                        ),
                         vec![
                             ("params".to_string(), params),
                             ("encSecKey".to_string(), enc_sec_key),
@@ -312,7 +324,11 @@ impl NeteaseClient {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        Err(ApiError::Api { code, message, endpoint: path.into() })
+        Err(ApiError::Api {
+            code,
+            message,
+            endpoint: path.into(),
+        })
     }
 
     async fn fetch_account(&self) -> Result<Option<UserProfile>, ApiError> {
@@ -324,10 +340,11 @@ impl NeteaseClient {
                 false,
             )
             .await?;
-        let response: AccountResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: "/api/nuser/account/get".into(),
-            message: e.to_string(),
-        })?;
+        let response: AccountResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: "/api/nuser/account/get".into(),
+                message: e.to_string(),
+            })?;
         Ok(response.into_profile())
     }
 
@@ -337,8 +354,9 @@ impl NeteaseClient {
         let mut session = self.session.write().await;
         if let Some(profile) = profile.clone() {
             let was_logged_in = session.logged_in();
+            let changed = session.profile.as_ref() != Some(&profile);
             session.set_profile(profile.clone());
-            if !was_logged_in || session.profile.as_ref() != Some(&profile) {
+            if !was_logged_in || changed {
                 if let Err(e) = session.persist() {
                     tracing::warn!(error = %e, "failed to persist account session");
                 }
@@ -383,10 +401,11 @@ impl NeteaseClient {
                 endpoint: "/api/login/qrcode/unikey".into(),
             });
         }
-        let response: QrKeyResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: "/api/login/qrcode/unikey".into(),
-            message: e.to_string(),
-        })?;
+        let response: QrKeyResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: "/api/login/qrcode/unikey".into(),
+                message: e.to_string(),
+            })?;
         let key = response
             .unikey
             .or_else(|| response.data.and_then(|d| d.unikey))
@@ -410,20 +429,18 @@ impl NeteaseClient {
             )
             .await?;
         let code = json_i64(&value, "code").unwrap_or(0);
-        let response: QrCheckResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: "/api/login/qrcode/client/login".into(),
-            message: e.to_string(),
-        })?;
-        let message = response
-            .message
-            .clone()
-            .unwrap_or_else(|| match code {
-                800 => "QR code expired".into(),
-                801 => "Waiting for scan".into(),
-                802 => "Scanned, waiting for confirmation".into(),
-                803 => "Login successful".into(),
-                _ => format!("QR login status {code}"),
-            });
+        let response: QrCheckResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: "/api/login/qrcode/client/login".into(),
+                message: e.to_string(),
+            })?;
+        let message = response.message.clone().unwrap_or_else(|| match code {
+            800 => "QR code expired".into(),
+            801 => "Waiting for scan".into(),
+            802 => "Scanned, waiting for confirmation".into(),
+            803 => "Login successful".into(),
+            _ => format!("QR login status {code}"),
+        });
         let status = match code {
             800 => QrLoginStatus::Expired,
             801 => QrLoginStatus::Waiting,
@@ -562,9 +579,7 @@ impl NeteaseClient {
         Ok(raw
             .into_iter()
             .filter(|p| match kind {
-                PlaylistKind::Created => {
-                    !p.subscribed.unwrap_or(false) && p.special_type != 5
-                }
+                PlaylistKind::Created => !p.subscribed.unwrap_or(false) && p.special_type != 5,
                 PlaylistKind::Subscribed => p.subscribed.unwrap_or(false),
             })
             .map(RawPlaylist::into_summary)
@@ -614,14 +629,24 @@ impl NeteaseClient {
         let raw = self.playlist_detail_raw(id).await?;
         let ids = raw.ordered_track_ids();
         let total = ids.len();
-        let limit = if limit == 0 { total } else { limit.min(100_000) };
+        let limit = if limit == 0 {
+            total
+        } else {
+            limit.min(100_000)
+        };
         let offset = offset.min(total);
         let end = offset.saturating_add(limit).min(total);
         let slice = &ids[offset..end];
         let songs = self.song_details(slice).await?;
         let summary = raw.into_summary();
         let has_more = end < total;
-        Ok(PlaylistTracks { playlist: summary, songs, offset, total, has_more })
+        Ok(PlaylistTracks {
+            playlist: summary,
+            songs,
+            offset,
+            total,
+            has_more,
+        })
     }
 
     pub async fn liked_songs(&self) -> Result<SongsView, ApiError> {
@@ -633,7 +658,11 @@ impl NeteaseClient {
                 || p.name.eq_ignore_ascii_case("liked songs")
         }) {
             let id = liked.id;
-            let name = if liked.name.is_empty() { "Liked Songs".to_string() } else { liked.name.clone() };
+            let name = if liked.name.is_empty() {
+                "Liked Songs".to_string()
+            } else {
+                liked.name.clone()
+            };
             let tracks = self.playlist_tracks(id, 0, 100_000).await?;
             return Ok(SongsView {
                 title: name.clone(),
@@ -644,12 +673,17 @@ impl NeteaseClient {
         }
         let uid = self.current_uid().await?;
         let value = self
-            .post_ok(CryptoMode::Eapi, "/api/song/like/get", json!({ "uid": uid }))
+            .post_ok(
+                CryptoMode::Eapi,
+                "/api/song/like/get",
+                json!({ "uid": uid }),
+            )
             .await?;
-        let response: LikeListResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: "/api/song/like/get".into(),
-            message: e.to_string(),
-        })?;
+        let response: LikeListResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: "/api/song/like/get".into(),
+                message: e.to_string(),
+            })?;
         let songs = self.song_details(&response.ids).await?;
         Ok(SongsView {
             title: "Liked Songs".into(),
@@ -783,8 +817,7 @@ impl NeteaseClient {
         });
         let Some(found) = found else {
             return Err(ApiError::Unsupported(
-                "Private Radar is not present in this account's daily recommended playlists"
-                    .into(),
+                "Private Radar is not present in this account's daily recommended playlists".into(),
             ));
         };
         self.playlist_tracks(found.id, 0, 100_000).await
@@ -817,7 +850,11 @@ impl NeteaseClient {
         let mut seen = HashSet::new();
         entries.retain(|entry| seen.insert(entry.id));
         entries.truncate(100);
-        let missing: Vec<u64> = entries.iter().filter(|e| e.song.is_none()).map(|e| e.id).collect();
+        let missing: Vec<u64> = entries
+            .iter()
+            .filter(|e| e.song.is_none())
+            .map(|e| e.id)
+            .collect();
         let fetched = self.song_details(&missing).await?;
         let mut fetched: HashMap<u64, Song> = fetched.into_iter().map(|s| (s.id, s)).collect();
         let mut songs = Vec::new();
@@ -866,10 +903,11 @@ impl NeteaseClient {
                 }),
             )
             .await?;
-        let response: SearchResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: "/api/cloudsearch/pc".into(),
-            message: e.to_string(),
-        })?;
+        let response: SearchResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: "/api/cloudsearch/pc".into(),
+                message: e.to_string(),
+            })?;
         let r = response.result;
         let (items, total) = match kind {
             SearchKind::Songs => {
@@ -890,17 +928,21 @@ impl NeteaseClient {
                 (SearchItems::Albums(items), total)
             }
             SearchKind::Playlists => {
-                let items: Vec<PlaylistSummary> = r
-                    .playlists
-                    .into_iter()
-                    .map(|p| p.into_summary())
-                    .collect();
+                let items: Vec<PlaylistSummary> =
+                    r.playlists.into_iter().map(|p| p.into_summary()).collect();
                 let total = r.playlist_count.max(items.len());
                 (SearchItems::Playlists(items), total)
             }
         };
         let has_more = offset.saturating_add(items.len()) < total;
-        Ok(SearchPage { query: query.into(), offset, limit, total, has_more, items })
+        Ok(SearchPage {
+            query: query.into(),
+            offset,
+            limit,
+            total,
+            has_more,
+            items,
+        })
     }
 
     pub async fn artist_songs(
@@ -933,26 +975,33 @@ impl NeteaseClient {
         if songs.is_empty() {
             return Err(ApiError::NotFound("artist songs".into()));
         }
-        Ok(SongsView { title: "Artist songs".into(), description: None, songs, context: None })
+        Ok(SongsView {
+            title: "Artist songs".into(),
+            description: None,
+            songs,
+            context: None,
+        })
     }
 
     pub async fn album_songs(&self, id: u64) -> Result<SongsView, ApiError> {
         let value = self
-            .post_ok(
-                CryptoMode::Weapi,
-                &format!("/api/v1/album/{id}"),
-                json!({}),
-            )
+            .post_ok(CryptoMode::Weapi, &format!("/api/v1/album/{id}"), json!({}))
             .await?;
-        let response: AlbumResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: format!("/api/v1/album/{id}"),
-            message: e.to_string(),
-        })?;
+        let response: AlbumResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: format!("/api/v1/album/{id}"),
+                message: e.to_string(),
+            })?;
         let album = response.album;
         let mut songs: Vec<Song> = response.songs.into_iter().map(RawSong::into_song).collect();
         if songs.is_empty() {
             if let Some(album) = &album {
-                songs = album.songs.iter().cloned().map(RawSong::into_song).collect();
+                songs = album
+                    .songs
+                    .iter()
+                    .cloned()
+                    .map(RawSong::into_song)
+                    .collect();
             }
         }
         if songs.is_empty() {
@@ -967,7 +1016,12 @@ impl NeteaseClient {
             .as_ref()
             .and_then(|a| a.artists.as_ref().and_then(|v| v.first()))
             .map(|a| a.name.clone());
-        Ok(SongsView { title, description, songs, context: None })
+        Ok(SongsView {
+            title,
+            description,
+            songs,
+            context: None,
+        })
     }
 
     pub async fn stream_url(&self, id: u64) -> Result<StreamUrl, ApiError> {
@@ -989,10 +1043,11 @@ impl NeteaseClient {
                     }),
                 )
                 .await?;
-            let response: StreamResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-                endpoint: "/api/song/enhance/player/url/v1".into(),
-                message: e.to_string(),
-            })?;
+            let response: StreamResponse =
+                serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                    endpoint: "/api/song/enhance/player/url/v1".into(),
+                    message: e.to_string(),
+                })?;
             let item = response.data.into_iter().find(|item| item.id == id);
             let Some(item) = item else {
                 last_reason = "no stream entry returned".into();
@@ -1039,10 +1094,11 @@ impl NeteaseClient {
                 json!({ "id": id, "tv": -1, "lv": -1, "rv": -1, "kv": -1, "_nmclfl": 1 }),
             )
             .await?;
-        let response: LyricResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-            endpoint: "/api/song/lyric".into(),
-            message: e.to_string(),
-        })?;
+        let response: LyricResponse =
+            serde_json::from_value(value).map_err(|e| ApiError::Decode {
+                endpoint: "/api/song/lyric".into(),
+                message: e.to_string(),
+            })?;
         let lrc = response.lrc.map(|l| l.lyric).unwrap_or_default();
         if lrc.trim().is_empty() || response.nolyric {
             return Err(ApiError::NotFound("lyrics".into()));
@@ -1155,12 +1211,16 @@ fn extract_recent(value: &Value) -> Vec<RecentEntry> {
         value.pointer("/data/data"),
     ];
     for array in arrays.into_iter().flatten() {
-        let Some(items) = array.as_array() else { continue };
+        let Some(items) = array.as_array() else {
+            continue;
+        };
         for item in items {
             let song = [
                 candidate_song(item),
                 item.get("data").and_then(candidate_song),
-                item.get("data").and_then(|d| d.get("song")).and_then(candidate_song),
+                item.get("data")
+                    .and_then(|d| d.get("song"))
+                    .and_then(candidate_song),
                 item.get("song").and_then(candidate_song),
             ]
             .into_iter()
@@ -1247,7 +1307,10 @@ mod tests {
         });
         let entries = extract_recent(&value);
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1, 4, 5]);
+        assert_eq!(
+            entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![1, 4, 5]
+        );
         assert!(entries[0].song.is_some());
         assert!(entries[1].song.is_none());
     }

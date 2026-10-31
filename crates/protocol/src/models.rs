@@ -212,10 +212,11 @@ pub struct SearchPage {
     pub items: SearchItems,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayMode {
     /// Play the queue in order, wrap after the last track.
+    #[default]
     ListLoop,
     /// Repeat the current track.
     TrackLoop,
@@ -307,7 +308,8 @@ impl PlaybackStatus {
         match self {
             PlaybackStatus::Playing => "Playing",
             PlaybackStatus::Paused => "Paused",
-            PlaybackStatus::Stopped | PlaybackStatus::Buffering => "Stopped",
+            PlaybackStatus::Buffering => "Playing",
+            PlaybackStatus::Stopped => "Stopped",
         }
     }
 }
@@ -328,15 +330,30 @@ pub struct PlaySource {
     pub personal_fm: bool,
 }
 
+impl Default for PlaySource {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
 impl PlaySource {
     pub fn none() -> Self {
-        Self { playlist: None, personal_fm: false }
+        Self {
+            playlist: None,
+            personal_fm: false,
+        }
     }
     pub fn playlist(p: PlaylistRef) -> Self {
-        Self { playlist: Some(p), personal_fm: false }
+        Self {
+            playlist: Some(p),
+            personal_fm: false,
+        }
     }
     pub fn personal_fm() -> Self {
-        Self { playlist: None, personal_fm: true }
+        Self {
+            playlist: None,
+            personal_fm: true,
+        }
     }
 }
 

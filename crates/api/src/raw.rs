@@ -9,9 +9,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use yoruplay_protocol::{
-    AlbumSummary, ArtistSummary, PlaylistSummary, Song, UserProfile,
-};
+use yoruplay_protocol::{AlbumSummary, ArtistSummary, PlaylistSummary, Song, UserProfile};
 
 fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -120,11 +118,24 @@ impl RawSong {
         let album_name = album.as_ref().map(|a| a.name.clone()).unwrap_or_default();
         let album_id = album.as_ref().map(|a| a.id).unwrap_or(0);
         let cover_url = album.and_then(|a| a.pic_url);
-        let fee = self.privilege.as_ref().map(|p| p.fee).filter(|v| *v != 0).unwrap_or(self.fee);
+        let fee = self
+            .privilege
+            .as_ref()
+            .map(|p| p.fee)
+            .filter(|v| *v != 0)
+            .unwrap_or(self.fee);
         Song {
             id: self.id,
-            name: if self.name.is_empty() { format!("Track {}", self.id) } else { self.name },
-            artists: artists.iter().map(|a| a.name.clone()).filter(|n| !n.is_empty()).collect(),
+            name: if self.name.is_empty() {
+                format!("Track {}", self.id)
+            } else {
+                self.name
+            },
+            artists: artists
+                .iter()
+                .map(|a| a.name.clone())
+                .filter(|n| !n.is_empty())
+                .collect(),
             artist_ids: artists.iter().map(|a| a.id).filter(|id| *id != 0).collect(),
             album: album_name,
             album_id,
@@ -182,7 +193,11 @@ pub struct RawPlaylist {
 
 impl RawPlaylist {
     pub fn into_summary(self) -> PlaylistSummary {
-        let creator_id = self.creator.as_ref().map(|c| c.user_id).unwrap_or(self.user_id);
+        let creator_id = self
+            .creator
+            .as_ref()
+            .map(|c| c.user_id)
+            .unwrap_or(self.user_id);
         let creator_name = self
             .creator
             .as_ref()
@@ -198,7 +213,11 @@ impl RawPlaylist {
         };
         PlaylistSummary {
             id: self.id,
-            name: if self.name.is_empty() { format!("Playlist {}", self.id) } else { self.name },
+            name: if self.name.is_empty() {
+                format!("Playlist {}", self.id)
+            } else {
+                self.name
+            },
             cover_url: self.cover_img_url,
             track_count,
             subscribed: self.subscribed.unwrap_or(false),
@@ -250,7 +269,11 @@ impl RawProfile {
     pub fn into_profile(self) -> UserProfile {
         UserProfile {
             user_id: self.user_id,
-            nickname: if self.nickname.is_empty() { format!("User {}", self.user_id) } else { self.nickname },
+            nickname: if self.nickname.is_empty() {
+                format!("User {}", self.user_id)
+            } else {
+                self.nickname
+            },
             avatar_url: self.avatar_url,
             signature: self.signature,
             background_url: self.background_url,
@@ -283,7 +306,11 @@ impl AccountResponse {
         }
         self.account.map(|a| UserProfile {
             user_id: a.id,
-            nickname: if a.user_name.is_empty() { format!("User {}", a.id) } else { a.user_name },
+            nickname: if a.user_name.is_empty() {
+                format!("User {}", a.id)
+            } else {
+                a.user_name
+            },
             avatar_url: None,
             signature: None,
             background_url: None,
@@ -323,7 +350,11 @@ impl RawArtist {
     pub fn into_summary(self) -> ArtistSummary {
         ArtistSummary {
             id: self.id,
-            name: if self.name.is_empty() { format!("Artist {}", self.id) } else { self.name },
+            name: if self.name.is_empty() {
+                format!("Artist {}", self.id)
+            } else {
+                self.name
+            },
             cover_url: self.pic_url,
             album_count: self.album_size,
             song_count: self.music_size,
@@ -342,7 +373,11 @@ impl RawAlbum {
             .unwrap_or_default();
         AlbumSummary {
             id: self.id,
-            name: if self.name.is_empty() { format!("Album {}", self.id) } else { self.name },
+            name: if self.name.is_empty() {
+                format!("Album {}", self.id)
+            } else {
+                self.name
+            },
             cover_url: self.pic_url,
             artist_name,
             track_count: self.size,
@@ -535,10 +570,8 @@ mod tests {
 
     #[test]
     fn parses_song_detail_fixture() {
-        let resp: SongDetailResponse = serde_json::from_str(include_str!(
-            "../tests/fixtures/song_detail.json"
-        ))
-        .unwrap();
+        let resp: SongDetailResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/song_detail.json")).unwrap();
         assert_eq!(resp.code, 200);
         let song = resp.songs.into_iter().next().unwrap().into_song();
         assert_eq!(song.id, 186016);
@@ -568,10 +601,8 @@ mod tests {
 
     #[test]
     fn playlist_deduplicates_and_orders_ids() {
-        let resp: PlaylistDetailResponse = serde_json::from_str(include_str!(
-            "../tests/fixtures/playlist_detail.json"
-        ))
-        .unwrap();
+        let resp: PlaylistDetailResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/playlist_detail.json")).unwrap();
         let raw = resp.playlist.unwrap();
         let ids = raw.ordered_track_ids();
         assert!(!ids.is_empty());

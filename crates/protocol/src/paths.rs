@@ -46,7 +46,12 @@ impl Paths {
                 PathBuf::from(format!("/tmp/yoruplay-{uid}"))
             }
         };
-        Ok(Self { config_dir, data_dir, cache_dir, runtime_dir })
+        Ok(Self {
+            config_dir,
+            data_dir,
+            cache_dir,
+            runtime_dir,
+        })
     }
 
     pub fn config_file(&self) -> PathBuf {
@@ -83,7 +88,12 @@ impl Paths {
 
     /// Create all directories with owner-only access where appropriate.
     pub fn ensure_dirs(&self) -> io::Result<()> {
-        for dir in [&self.config_dir, &self.data_dir, &self.cache_dir, &self.runtime_dir] {
+        for dir in [
+            &self.config_dir,
+            &self.data_dir,
+            &self.cache_dir,
+            &self.runtime_dir,
+        ] {
             fs::create_dir_all(dir)?;
         }
         for dir in [&self.data_dir, &self.runtime_dir] {
@@ -110,7 +120,10 @@ mod tests {
         let paths = Paths::from_env(|k| env.get(k).map(|v| (*v).into())).unwrap();
         assert_eq!(paths.config_dir, PathBuf::from("/cfg/yoruplay"));
         assert_eq!(paths.data_dir, PathBuf::from("/data/yoruplay"));
-        assert_eq!(paths.socket_file(), PathBuf::from("/run/user/1000/yoruplay/yoruplay.sock"));
+        assert_eq!(
+            paths.socket_file(),
+            PathBuf::from("/run/user/1000/yoruplay/yoruplay.sock")
+        );
     }
 
     #[test]
@@ -119,6 +132,9 @@ mod tests {
         let paths = Paths::from_env(|k| env.get(k).map(|v| (*v).into())).unwrap();
         assert_eq!(paths.config_dir, PathBuf::from("/home/u/.config/yoruplay"));
         assert_eq!(paths.cache_dir, PathBuf::from("/home/u/.cache/yoruplay"));
-        assert!(paths.runtime_dir.to_string_lossy().starts_with("/tmp/yoruplay-"));
+        assert!(paths
+            .runtime_dir
+            .to_string_lossy()
+            .starts_with("/tmp/yoruplay-"));
     }
 }
