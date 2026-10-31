@@ -256,7 +256,11 @@ impl MprisPlayer {
     async fn metadata(&self) -> HashMap<String, OwnedValue> {
         let playback = self.daemon.playback().await;
         let lyrics = self.daemon.lyrics().await;
-        metadata_for(playback.current.as_ref(), lyrics.as_deref())
+        metadata_for(
+            playback.current.as_ref(),
+            lyrics.as_deref(),
+            Some(playback.duration_ms),
+        )
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
@@ -328,7 +332,11 @@ pub fn track_path(id: u64) -> String {
     format!("/org/yoruplay/track/{id}")
 }
 
-pub fn metadata_for(song: Option<&Song>, lyrics: Option<&str>) -> HashMap<String, OwnedValue> {
+pub fn metadata_for(
+    song: Option<&Song>,
+    lyrics: Option<&str>,
+    duration_override_ms: Option<u64>,
+) -> HashMap<String, OwnedValue> {
     let Some(song) = song else {
         return HashMap::new();
     };
@@ -348,8 +356,11 @@ pub fn metadata_for(song: Option<&Song>, lyrics: Option<&str>) -> HashMap<String
     if !song.album.is_empty() {
         map.insert("xesam:album".into(), owned_string(song.album.clone()));
     }
-    if song.duration_ms > 0 {
-        let micros = song.duration_ms.saturating_mul(1000).min(i64::MAX as u64) as i64;
+    let duration_ms = duration_override_ms
+        .filter(|duration| *duration > 0)
+        .unwrap_or(song.duration_ms);
+    if duration_ms > 0 {
+        let micros = duration_ms.saturating_mul(1000).min(i64::MAX as u64) as i64;
         map.insert("mpris:length".into(), OwnedValue::from(micros));
     }
     if let Some(url) = song.cover_url.as_ref().filter(|u| !u.is_empty()) {
@@ -538,7 +549,7 @@ async fn emit_changes(
         || previous.duration_ms != current.duration_ms
         || previous.lyrics != current.lyrics
     {
-        let metadata = metadata_for(song, lyrics);
+        let metadata = metadata_for(song, lyrics, Some(current.duration_ms));
         if let Ok(value) = OwnedValue::try_from(Value::from(metadata)) {
             changed.insert("Metadata", Value::from(value));
         } else {
@@ -571,7 +582,7 @@ mod tests {
 
     #[test]
     fn metadata_uses_microseconds_and_stable_track_path() {
-        let map = metadata_for(Some(&song()), Some("line"));
+        let map = metadata_for(Some(&song()), Some("line"), None);
         assert_eq!(track_path(42), "/org/yoruplay/track/42");
         assert_eq!(
             i64::try_from(map.get("mpris:length").unwrap().clone()).unwrap(),
@@ -589,7 +600,7 @@ mod tests {
 
     #[test]
     fn empty_metadata_when_no_track() {
-        assert!(metadata_for(None, None).is_empty());
+        assert!(metadata_for(None, None, None).is_empty());
     }
 
     #[test]

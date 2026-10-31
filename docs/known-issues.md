@@ -1,5 +1,11 @@
 # Known issues and limitations
 
+- **Real-account verification gap**: the delivered run had no completed QR
+  login. Account-only endpoints and Heartbeat's recommendation response were not
+  exercised against a real account. Everything below that depends on account
+  authorization must be treated as implemented-but-unverified until the user
+  runs `yoruplay login` and the verification suite in
+  `crates/api/tests/live_account.rs`.
 - **Private Radar discovery**: there is no separate radar module in the current
   upstream API. YoruPlay searches the account's daily recommended playlists for
   a name containing `私人雷达` / `Private Radar`. If NetEase changes that naming
@@ -25,6 +31,9 @@
   disconnect can cause an mpv stream error; YoruPlay retries the URL once and
   shows an error if audio still fails. Device switching is not explicitly
   orchestrated.
+- **mpv cache**: reduced to 16 MiB forward / 4 MiB back / 60 s to meet the
+  memory target. Very unstable networks may prefer a larger cache; this is
+  currently a compiled default, not a config option.
 - **Sleep/wake and network changes**: no background network poller. A stale
   stream is refreshed on resume/error; the next user action retries API calls.
 - **Trial streams**: when the account can only play a preview, the daemon

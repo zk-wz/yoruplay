@@ -174,7 +174,8 @@ struct DaemonInner {
     pending_qr: Mutex<Option<QrLogin>>,
     last_save: Mutex<Instant>,
     shutting_down: AtomicBool,
-    mpv_event_tx: mpsc::Sender<MpvEvent>,
+    mpv_event_tx: mpsc::Sender<(u64, MpvEvent)>,
+    mpv_generation: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -265,7 +266,7 @@ impl Daemon {
             warnings,
         };
         let last_save = Mutex::new(Instant::now() - Duration::from_secs(10));
-        let (mpv_event_tx, mut mpv_event_rx) = mpsc::channel::<MpvEvent>(256);
+        let (mpv_event_tx, mut mpv_event_rx) = mpsc::channel::<(u64, MpvEvent)>(256);
         let daemon = Self {
             inner: Arc::new(DaemonInner {
                 config,
@@ -282,12 +283,15 @@ impl Daemon {
                 last_save,
                 shutting_down: AtomicBool::new(false),
                 mpv_event_tx,
+                mpv_generation: AtomicU64::new(0),
             }),
         };
         let handler = daemon.clone();
         tokio::spawn(async move {
-            while let Some(event) = mpv_event_rx.recv().await {
-                handler.handle_mpv_event(event).await;
+            while let Some((generation, event)) = mpv_event_rx.recv().await {
+                if generation == handler.inner.mpv_generation.load(Ordering::SeqCst) {
+                    handler.handle_mpv_event(event).await;
+                }
             }
         });
         daemon
@@ -462,6 +466,7 @@ impl Daemon {
         }
         self.publish_playback().await;
         self.save_state(true).await;
+        self.shutdown_mpv().await;
     }
 
     pub async fn handle_command(&self, command: Command) -> Result<CommandResult, ErrorInfo> {
@@ -868,9 +873,7 @@ impl Daemon {
             outcome
         };
         if outcome == (RemoveOutcome::RemovedCurrent { stopped: true }) {
-            if let Some(mpv) = self.inner.mpv.lock().await.as_ref() {
-                let _ = mpv.stop().await;
-            }
+            self.shutdown_mpv().await;
         }
         let _ = generation;
         self.publish_queue().await;
@@ -882,9 +885,6 @@ impl Daemon {
     async fn queue_clear(&self) -> Result<CommandResult, ServiceError> {
         let _lock = self.inner.play_lock.lock().await;
         self.next_generation();
-        if let Some(mpv) = self.inner.mpv.lock().await.as_ref() {
-            let _ = mpv.stop().await;
-        }
         {
             let mut state = self.inner.state.write().await;
             state.queue.clear();
@@ -898,6 +898,7 @@ impl Daemon {
         self.publish_queue().await;
         self.publish_playback().await;
         self.save_state(true).await;
+        self.shutdown_mpv().await;
         Ok(CommandResult::ack_msg("Queue cleared"))
     }
 
@@ -962,9 +963,6 @@ impl Daemon {
     async fn stop(&self) -> Result<CommandResult, ServiceError> {
         let _lock = self.inner.play_lock.lock().await;
         self.next_generation();
-        if let Some(mpv) = self.inner.mpv.lock().await.as_ref() {
-            let _ = mpv.stop().await;
-        }
         {
             let mut state = self.inner.state.write().await;
             state.status = PlaybackStatus::Stopped;
@@ -973,6 +971,7 @@ impl Daemon {
         }
         self.publish_playback().await;
         self.save_state(true).await;
+        self.shutdown_mpv().await;
         Ok(CommandResult::ack())
     }
 
@@ -1032,6 +1031,7 @@ impl Daemon {
                 }
                 self.publish_playback().await;
                 self.save_state(true).await;
+                self.shutdown_mpv().await;
                 Ok(CommandResult::ack_msg("End of queue"))
             }
             Advance::Heartbeat => match self.heartbeat_locked(generation).await {
@@ -1369,6 +1369,7 @@ impl Daemon {
                 return Err(ServiceError::Mpv(e));
             }
         };
+        let generation = self.inner.mpv_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let mut events = mpv.subscribe();
         let event_tx = self.inner.mpv_event_tx.clone();
         // Forwarding only. The event handler lives in one task created in
@@ -1377,7 +1378,7 @@ impl Daemon {
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        if event_tx.send(event).await.is_err() {
+                        if event_tx.send((generation, event)).await.is_err() {
                             break;
                         }
                     }
@@ -1397,6 +1398,15 @@ impl Daemon {
                 .retain(|w| !w.starts_with("YoruPlay requires mpv"));
         }
         Ok(())
+    }
+
+    async fn shutdown_mpv(&self) {
+        // Invalidate all events from the old process before/while it exits.
+        self.inner.mpv_generation.fetch_add(1, Ordering::SeqCst);
+        let controller = self.inner.mpv.lock().await.take();
+        if let Some(controller) = controller {
+            controller.shutdown().await;
+        }
     }
 
     async fn handle_mpv_event(&self, event: MpvEvent) {
@@ -1502,6 +1512,7 @@ impl Daemon {
             drop(state);
             self.publish_playback().await;
             self.save_state(true).await;
+            self.shutdown_mpv().await;
             return Err(ServiceError::Unsupported(
                 "the audio stream could not be opened".into(),
             ));

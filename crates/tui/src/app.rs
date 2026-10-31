@@ -1615,3 +1615,23 @@ pub fn search_kind_label(lang: Language, kind: SearchKind) -> &'static str {
         (Language::Zh, SearchKind::Playlists) => "歌单",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translations_and_mode_labels_cover_both_languages() {
+        assert_eq!(tr(Language::En, "Queue", "播放队列"), "Queue");
+        assert_eq!(tr(Language::Zh, "Queue", "播放队列"), "播放队列");
+        assert_eq!(
+            mode_label(Language::En, PlayMode::Intelligence),
+            "Heartbeat"
+        );
+        assert_eq!(mode_label(Language::Zh, PlayMode::Intelligence), "心动模式");
+        assert_eq!(
+            search_kind_label(Language::Zh, SearchKind::Playlists),
+            "歌单"
+        );
+    }
+}

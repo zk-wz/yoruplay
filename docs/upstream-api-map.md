@@ -63,8 +63,14 @@ Deliberate differences:
   deserialisation and queue/mode state machines.
 - Anonymous live smoke: QR key/poll, song detail, search (all four types),
   public playlist tracks, lyrics. See `crates/api/tests/live_smoke.rs`.
-- Real-account verification (QR login, personal lists, daily data, FM, Radar,
-  Heartbeat, recent history, playable URL) is recorded in
+- Anonymous live verification succeeded for: QR key/poll/expiry, song detail,
+  search (songs/artists/albums/playlists), public playlist tracks, lyrics,
+  stream URL for free/trial tracks, and actual mpv playback through
+  pipewire-pulse.
+- **Real-account verification was not completed**: no QR scan was confirmed in
+  this environment. Personal lists, daily data, Personal FM, Private Radar,
+  recently played, Heartbeat recommendation, and account-quality streams remain
+  implemented but not live-verified. This is recorded in
   `docs/resource-usage.md` and the final delivery report.
 
 ## Updating from upstream
