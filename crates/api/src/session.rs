@@ -250,12 +250,25 @@ impl SessionData {
     /// Persist only when a real login exists. The file is written atomically
     /// with 0600 permissions; the parent directory is forced to 0700.
     pub fn persist(&self) -> Result<(), ApiError> {
-        let Some(path) = &self.auth_path else {
-            return Ok(());
-        };
         if !self.logged_in() {
             return Ok(());
         }
+        self.write_auth_file()
+    }
+
+    /// Keep a stable device identity even before the first successful login.
+    /// NetEase risk control treats every new device ID as a new client, so
+    /// generating a fresh one on each daemon restart makes repeated QR scans
+    /// look suspicious. Only the device/cookie state is written; there is no
+    /// secret until login succeeds.
+    pub fn persist_device(&self) -> Result<(), ApiError> {
+        self.write_auth_file()
+    }
+
+    fn write_auth_file(&self) -> Result<(), ApiError> {
+        let Some(path) = &self.auth_path else {
+            return Ok(());
+        };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| ApiError::SessionIo(e.to_string()))?;
             let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
@@ -469,6 +482,21 @@ mod tests {
         assert!(loaded.logged_in());
         assert_eq!(loaded.profile.as_ref().unwrap().user_id, 7);
         assert_eq!(loaded.device.device_id, s.device.device_id);
+        loaded.remove_persisted().unwrap();
+    }
+
+    #[test]
+    fn anonymous_device_identity_can_be_persisted() {
+        let path = temp_path("device.json");
+        let session = SessionData::anonymous(Some(path.clone()));
+        session.persist_device().unwrap();
+        let loaded = SessionData::load(Some(path.clone())).unwrap();
+        assert!(!loaded.logged_in());
+        assert_eq!(loaded.device.device_id, session.device.device_id);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         loaded.remove_persisted().unwrap();
     }
 

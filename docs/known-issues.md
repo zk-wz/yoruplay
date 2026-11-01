@@ -1,5 +1,11 @@
 # Known issues and limitations
 
+- **QR risk control (NetEase code 8821 / "设备环境异常")**: NetEase can reject
+  a QR/web login based on IP or device environment. Upstream added the web
+  `chainId` QR URL and a stable anonymous device to address this; YoruPlay now
+  does the same. Clash TUN/proxy exit IPs can still trigger it. Use direct
+  routing for NetEase domains or import a `MUSIC_U` cookie from the official
+  web login. This is not an account ban.
 - **Real-account verification gap**: the delivered run had no completed QR
   login. Account-only endpoints and Heartbeat's recommendation response were not
   exercised against a real account. Everything below that depends on account

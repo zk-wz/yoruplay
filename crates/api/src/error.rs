@@ -72,6 +72,14 @@ impl ApiError {
                 Some("The track may require a subscription, be region restricted, or be removed.")
             }
             ApiError::SessionCorrupt(_) => Some("Log in again; the old auth file can be removed."),
+            ApiError::Api {
+                code: 8821 | 8810, ..
+            } => Some(
+                "NetEase risk control rejected this device/IP. It is not an account ban. \
+                 Route music.163.com/interfacepc.music.163.com/*.126.net directly (disable \
+                 Clash TUN for them), avoid repeated QR attempts for a while, or log in on \
+                 the official web page and import the MUSIC_U cookie.",
+            ),
             _ => None,
         }
     }

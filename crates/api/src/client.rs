@@ -112,6 +112,11 @@ impl NeteaseClient {
                 (SessionData::anonymous(auth_path), Some(warning))
             }
         };
+        if startup_warning.is_none() && !session.logged_in() {
+            if let Err(e) = session.persist_device() {
+                tracing::warn!(error = %e, "could not persist the device identity");
+            }
+        }
         Ok(Self {
             http,
             endpoints,
@@ -414,8 +419,15 @@ impl NeteaseClient {
                 endpoint: "/api/login/qrcode/unikey".into(),
                 message: "missing unikey".into(),
             })?;
+        let chain_id = {
+            let session = self.session.read().await;
+            let device_id = session
+                .cookie("sDeviceId")
+                .unwrap_or(&session.device.device_id);
+            make_chain_id(device_id, now_ms())
+        };
         Ok(QrLogin {
-            url: format!("https://music.163.com/login?codekey={key}"),
+            url: format!("https://music.163.com/login?codekey={key}&chainId={chain_id}"),
             key,
         })
     }
@@ -441,17 +453,23 @@ impl NeteaseClient {
             803 => "Login successful".into(),
             _ => format!("QR login status {code}"),
         });
+        if code == 801 {
+            tracing::debug!(code, %message, "QR login poll");
+        } else {
+            tracing::info!(code, %message, "QR login state");
+        }
         let status = match code {
             800 => QrLoginStatus::Expired,
             801 => QrLoginStatus::Waiting,
             802 => QrLoginStatus::Scanned,
             803 => QrLoginStatus::Success,
             _ => {
+                tracing::warn!(code, %message, "QR login rejected");
                 return Err(ApiError::Api {
                     code,
                     message,
                     endpoint: "/api/login/qrcode/client/login".into(),
-                })
+                });
             }
         };
         if status == QrLoginStatus::Success {
@@ -1149,6 +1167,11 @@ impl NeteaseClient {
     }
 }
 
+pub fn make_chain_id(device_id: &str, timestamp_ms: u64) -> String {
+    // Matches upstream util/index.js generateChainId for the web login QR.
+    format!("v1_{device_id}_web_login_{timestamp_ms}")
+}
+
 fn json_i64(value: &Value, key: &str) -> Option<i64> {
     match value.get(key)? {
         Value::Number(n) => n.as_i64(),
@@ -1336,6 +1359,14 @@ mod tests {
         let mut seen = HashSet::new();
         levels.retain(|q| seen.insert(q.as_str()));
         assert_eq!(levels, vec![Quality::Exhigh, Quality::Standard]);
+    }
+
+    #[test]
+    fn web_chain_id_matches_upstream_format() {
+        assert_eq!(
+            make_chain_id("ABCDEF", 1_700_000_000_000),
+            "v1_ABCDEF_web_login_1700000000000"
+        );
     }
 
     #[test]

@@ -96,8 +96,10 @@ system/root service. The reference unit is also in `systemd/yoruplay.service`.
 yoruplay login
 ```
 
-A Unicode QR is printed in the terminal. Scan it with the NetEase Cloud Music
-app and confirm. For SSH or terminals too small for a QR, write an SVG:
+A Unicode QR is printed in the terminal. The QR URL uses the web-login
+`chainId` format from upstream (the same flow as the official web QR page).
+Scan it with the NetEase Cloud Music app and confirm. For SSH or terminals too
+small for a QR, write an SVG:
 
 ```sh
 yoruplay login --qr-svg ~/yoruplay-login.svg
@@ -112,7 +114,20 @@ printf '%s\n' "$NETEASE_COOKIE" | yoruplay login --cookie-stdin
 Avoid passing cookies as command-line arguments; YoruPlay only accepts stdin
 for this reason. Credentials are stored in
 `$XDG_DATA_HOME/yoruplay/auth.json` with mode `0600`; the runtime directory is
-`0700` and the IPC/mpv sockets are `0600`.
+`0700` and the IPC/mpv sockets are `0600`. Before the first login this file may
+contain only a stable device identity (no cookie), so repeated QR attempts do
+not look like a new device every time.
+
+If NetEase says the device environment is abnormal / returns risk code 8821,
+this is NetEase risk control rather than an account ban. Try:
+
+1. Route `music.163.com`, `interfacepc.music.163.com` and `*.126.net` directly
+   in Clash, or temporarily disable TUN/proxy.
+2. Wait a few minutes; repeated QR generation can be flagged.
+3. Log in on the official `https://music.163.com` page in a browser, then import
+   the `MUSIC_U` cookie:
+   `printf '%s\n' "MUSIC_U=..." | yoruplay login --cookie-stdin`
+4. Check `journalctl --user -u yoruplay` for the exact QR poll code/message.
 
 Logout removes the saved session:
 

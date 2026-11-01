@@ -21,7 +21,7 @@ The port covers only endpoints YoruPlay needs. The Rust code lives in
 | `crypto::random_weapi_secret` | `weapi` | Base62, 16 characters. |
 | `client::NeteaseClient::post_json` | `util/request.js` | Reuses one reqwest pool, form encoding, cookie handling, eapi/weapi only. |
 | `session::SessionData` | cookie helpers in `util/request.js` / `util/index.js` | Device identity, `MUSIC_U`, `__csrf`, `NMTID`, atomic 0600 persistence. |
-| `client::QrLogin` / QR URL | `login_qr_create` | URL assembled locally; no `qrcode` dependency on Node. ANSI/SVG QR rendered by YoruPlay. |
+| `client::QrLogin` / QR URL | `login_qr_create` | Web-login `chainId=v1_<deviceId>_web_login_<ms>` URL, matching upstream commit `4f4aa13`; stable pre-login device persisted. ANSI/SVG QR rendered by YoruPlay. |
 
 Deliberate differences:
 
