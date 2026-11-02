@@ -205,6 +205,9 @@ cargo test -p yoruplay-api --test live_smoke -- --ignored --nocapture
 ## 6. Git 提交
 
 ```text
+6c0ed70 fix(auth): adopt current web QR login and add daemon shutdown
+21e5004 fix(auth): use web chainId and stable pre-login device
+f7be1d0 docs: add final delivery report
 97767c2 fix(player): reap idle mpv and verify real playback path
 cedd914 fix: harden MPRIS signals, persistence and TUI edge cases
 2b3f709 docs: document setup, upstream mapping and architecture
@@ -222,7 +225,8 @@ cedd914 fix: harden MPRIS signals, persistence and TUI edge cases
 - 创建/使用 `~/.config/yoruplay/config.toml`、
   `~/.local/share/yoruplay/state.json`、`$XDG_RUNTIME_DIR/yoruplay/`
 - 当前服务 `active`、`UnitFileState=disabled`
-- 测试队列已清空、缓存已清空、没有 auth.json（未登录）、无 mpv 残留
+- 测试队列已清空、缓存已清空、`auth.json` 仅含设备身份（无 `MUSIC_U`）、
+  无 mpv 残留
 
 未修改：内核、UKI、Secure Boot、PAM/sudoers、系统音频服务、RTKit 限制、
 系统网络/代理、其他应用配置、开机启动状态。未使用 root。
