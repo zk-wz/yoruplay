@@ -13,7 +13,10 @@ async fn live_read_only_smoke() {
     let client = NeteaseClient::new(&ApiConfig::default(), None).unwrap();
     let qr = client.start_qr_login().await.expect("qr key");
     assert!(!qr.key.is_empty());
-    let poll = client.poll_qr_login(&qr.key).await.expect("qr poll");
+    let poll = client
+        .poll_qr_login(&qr.key, &qr.chain_id)
+        .await
+        .expect("qr poll");
     println!("qr status: {:?} {}", poll.status, poll.message);
     assert_eq!(poll.status, yoruplay_protocol::QrLoginStatus::Waiting);
 

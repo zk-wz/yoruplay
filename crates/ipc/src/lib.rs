@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
@@ -24,6 +25,7 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<CommandResult, Erro
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
@@ -41,6 +43,8 @@ pub enum IpcError {
     Encode(String),
     #[error("invalid daemon response: {0}")]
     Decode(String),
+    #[error("daemon rejected shutdown: {0}")]
+    Daemon(String),
 }
 
 impl IpcError {
@@ -63,12 +67,129 @@ impl IpcError {
                 IpcError::Timeout => "daemon_timeout",
                 IpcError::Encode(_) => "encode_error",
                 IpcError::Decode(_) => "decode_error",
+                IpcError::Daemon(_) => "daemon_error",
             }
             .into(),
             message: self.to_string(),
             hint: hint.map(str::to_string),
         }
     }
+}
+
+/// Send a shutdown request even when the daemon speaks a different protocol
+/// version. This is used by `yoruplay shutdown` during an upgrade: the normal
+/// client refuses a version mismatch, but the `shutdown` command itself has a
+/// stable wire shape. The socket is owner-only, so this does not broaden access.
+pub async fn shutdown_any_version(path: impl AsRef<Path>) -> Result<(), IpcError> {
+    let path = path.as_ref();
+    // The server waits for the client Hello before sending its own Hello. A
+    // wrong guess still reveals the server version, but the server closes the
+    // connection, so reconnect with the reported version before sending
+    // Shutdown.
+    let (reader, writer, server_version) = open_shutdown_connection(path, PROTOCOL_VERSION).await?;
+    let (mut reader, mut writer) = if server_version != PROTOCOL_VERSION {
+        drop(reader);
+        drop(writer);
+        let (reader, writer, _) = open_shutdown_connection(path, server_version).await?;
+        (reader, writer)
+    } else {
+        (reader, writer)
+    };
+
+    write_shutdown_message(
+        &mut writer,
+        &ClientMessage::Request {
+            id: 1,
+            command: Command::Shutdown,
+        },
+    )
+    .await?;
+    let mut line = String::new();
+    for _ in 0..32 {
+        match read_shutdown_line(&mut reader, &mut line).await {
+            Ok(()) => {}
+            // The daemon may close immediately after scheduling shutdown.
+            Err(IpcError::Closed) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let message: ServerMessage =
+            serde_json::from_str(line.trim()).map_err(|e| IpcError::Decode(e.to_string()))?;
+        if let ServerMessage::Response {
+            id: 1,
+            result,
+            error,
+        } = message
+        {
+            if error.is_some() {
+                return Err(IpcError::Daemon(
+                    error.map(|e| e.message).unwrap_or_default(),
+                ));
+            }
+            if result.is_some() {
+                return Ok(());
+            }
+        }
+    }
+    Err(IpcError::Decode(
+        "daemon did not answer the shutdown request".into(),
+    ))
+}
+
+type ShutdownReader = BufReader<tokio::net::unix::OwnedReadHalf>;
+type ShutdownWriter = tokio::net::unix::OwnedWriteHalf;
+
+async fn open_shutdown_connection(
+    path: &Path,
+    guess: u32,
+) -> Result<(ShutdownReader, ShutdownWriter, u32), IpcError> {
+    let stream = timeout(CONNECT_TIMEOUT, UnixStream::connect(path))
+        .await
+        .map_err(|_| IpcError::Connect("connection timed out".into()))?
+        .map_err(|e| IpcError::Connect(e.to_string()))?;
+    let (read_half, mut write_half) = stream.into_split();
+    write_shutdown_message(&mut write_half, &ClientMessage::Hello { version: guess }).await?;
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    read_shutdown_line(&mut reader, &mut line).await?;
+    let hello: ServerMessage =
+        serde_json::from_str(line.trim()).map_err(|e| IpcError::Decode(e.to_string()))?;
+    let version = match hello {
+        ServerMessage::Hello { version, .. } => version,
+        _ => return Err(IpcError::Decode("daemon did not start with a hello".into())),
+    };
+    Ok((reader, write_half, version))
+}
+
+async fn write_shutdown_message<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    message: &ClientMessage,
+) -> Result<(), IpcError> {
+    let mut encoded =
+        serde_json::to_string(message).map_err(|e| IpcError::Encode(e.to_string()))?;
+    encoded.push('\n');
+    timeout(SHUTDOWN_TIMEOUT, writer.write_all(encoded.as_bytes()))
+        .await
+        .map_err(|_| IpcError::Timeout)?
+        .map_err(|_| IpcError::Closed)?;
+    timeout(SHUTDOWN_TIMEOUT, writer.flush())
+        .await
+        .map_err(|_| IpcError::Timeout)?
+        .map_err(|_| IpcError::Closed)
+}
+
+async fn read_shutdown_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut String,
+) -> Result<(), IpcError> {
+    line.clear();
+    let count = timeout(SHUTDOWN_TIMEOUT, reader.read_line(line))
+        .await
+        .map_err(|_| IpcError::Timeout)?
+        .map_err(|_| IpcError::Closed)?;
+    if count == 0 {
+        return Err(IpcError::Closed);
+    }
+    Ok(())
 }
 
 pub struct IpcClient {

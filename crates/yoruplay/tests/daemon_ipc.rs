@@ -218,6 +218,50 @@ async fn spawn_daemon_for(root: &Path, paths: &yoruplay_protocol::Paths) -> Chil
 }
 
 #[tokio::test]
+async fn cli_shutdown_stops_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let paths = yoruplay_protocol::Paths {
+        config_dir: root.join("config/yoruplay"),
+        data_dir: root.join("data/yoruplay"),
+        cache_dir: root.join("cache/yoruplay"),
+        runtime_dir: root.join("run/yoruplay"),
+    };
+    paths.ensure_dirs().unwrap();
+    std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = spawn_daemon_for(root, &paths).await;
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_yoruplay"))
+        .arg("shutdown")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent-yoruplay-bus",
+        )
+        .output()
+        .await
+        .expect("run yoruplay shutdown");
+    assert!(
+        output.status.success(),
+        "shutdown failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !paths.socket_file().exists(),
+        "shutdown returned but the socket still exists"
+    );
+    let status = timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("daemon did not exit")
+        .expect("wait daemon");
+    assert!(status.success(), "daemon exited with {status}");
+}
+
+#[tokio::test]
 async fn volume_and_mode_survive_daemon_restart() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

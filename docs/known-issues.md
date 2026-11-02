@@ -1,11 +1,19 @@
 # Known issues and limitations
 
-- **QR risk control (NetEase code 8821 / "设备环境异常")**: NetEase can reject
-  a QR/web login based on IP or device environment. Upstream added the web
-  `chainId` QR URL and a stable anonymous device to address this; YoruPlay now
-  does the same. Clash TUN/proxy exit IPs can still trigger it. Use direct
-  routing for NetEase domains or import a `MUSIC_U` cookie from the official
-  web login. This is not an account ban.
+- **QR risk control (NetEase code 8821 / "设备环境异常")**: YoruPlay now uses
+  the current official web flow (`/st/platform/scanlogin`, weapi `type=1`,
+  web `chainId`, web login headers). The previous `/login?codekey` URL and
+  Android `deviceId` chain were obsolete and caused the phone to reject the
+  scan before the API saw 802/803. NetEase can still reject a login based on IP
+  or device environment; Clash TUN/proxy exit IPs are a common cause. This is
+  not an account ban. If a scan still fails, use direct routing for NetEase
+  domains or import a `MUSIC_U` cookie from the official web login. See
+  `docs/login-protocol.md`.
+- **Web QR fingerprint token**: the official page sends `ydDeviceToken` from
+  NetEase's JavaScript fingerprint SDK. YoruPlay has no JS runtime and sends an
+  empty value (the same fallback used by other native clients when unavailable).
+  If NetEase makes a non-empty token mandatory, QR login will need a WebView or
+  browser helper; cookie import remains available.
 - **Real-account verification gap**: the delivered run had no completed QR
   login. Account-only endpoints and Heartbeat's recommendation response were not
   exercised against a real account. Everything below that depends on account

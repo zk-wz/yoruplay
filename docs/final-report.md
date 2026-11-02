@@ -136,20 +136,45 @@ eapi（上游该模块使用 xeapi），实际请求已验证可用；私人雷�
 满足 <100 MiB 目标；daemon 空闲 CPU 0.0–0.3%。mpv 缓存已从 64 MiB 降到
 16 MiB forward / 4 MiB back，PSS 从约 112 MiB 降到约 60 MiB。
 
-## 5. 真实账号验收与扫码风控补充
+## 5. 真实账号验收与扫码协议修正
 
-后续排查发现上游 issue #1/#4 记录了同样的“手机提示设备环境异常、API 收不到
-二维码状态”问题。上游修复提交 `4f4aa13` 为 Web 二维码增加
-`chainId=v1_<deviceId>_web_login_<timestamp>`，并改为生成稳定的匿名 device。
-YoruPlay 的首次移植遗漏了 `chainId`，现已修复：
+等待 24 小时后仍失败，进一步逐项对比并抓取官方 `https://music.163.com/login`
+页面后确认：问题不是账号封禁，也不是测试次数，而是 YoruPlay 和 upstream
+仍在使用的 **2025 年旧扫码协议**。
 
-- 二维码 URL 改为 Web 登录链式参数；
-- 未登录时也持久化稳定的设备身份（auth.json 0600，无秘密 Cookie）；
-- 二维码轮询状态/错误码写入 tracing 日志（不含 key/cookie）；
-- 8821/8810 风控错误给出明确提示（不是封号）。
+官方当前页面实际生成的二维码为：
 
-该修复仍需用户实际扫码复测。若仍出现风控，优先让网易云域名绕过 Clash TUN，
-或使用官方网页登录后通过 `--cookie-stdin` 导入 MUSIC_U。
+```text
+https://music.163.com/st/platform/scanlogin
+  ?codekey=...
+  &chainId=v1_unknown-<随机数>_web_login_<毫秒时间戳>
+  &hdw_device=web&hdw_appid=web&hitExp=1
+```
+
+key/poll 使用 weapi、`type=1`、`noCheckToken=true`，poll 带
+`x-os: web`、`x-loginmethod: QrCode`、`x-login-chain-id` 和
+`ydDeviceToken`。旧实现使用 eapi、`type=3`、`/login?codekey`，且把 Android
+`deviceId` 放进 `chainId`，手机侧会在打开二维码时直接拒绝，API 一直停在
+801/800。
+
+现已完成的修正：
+
+- 二维码 key 改为 weapi `type=1`；失败时仅回退到 eapi `type=1`；
+- QR 内容改为 `/st/platform/scanlogin` 的完整参数；
+- `chainId` 使用 `sDeviceId` 或 `unknown-<随机数>`，不再使用 Android deviceId；
+- poll 使用 weapi 和官方 Web 登录 headers，并携带 `chainId`；
+- IPC 协议升级到 v2，TUI/CLI 轮询携带 `chainId`；
+- 捕获 `x-refresh-token` 作为 `MUSIC_U` 的兜底；
+- 支持 860 取消状态；8821/8810 仍给出风控提示；
+- 新增 `yoruplay shutdown`（别名 `quit`），通过 IPC 优雅关闭 daemon，
+  保存队列并回收 mpv；兼容升级前旧协议 daemon 的 shutdown 握手，systemd
+  单元无响应时回退到 `systemctl --user stop`。
+
+实机 smoke（release，单次 key/poll，未扫码）验证：weapi key 返回 200，
+二维码内容为 `/st/platform/scanlogin` 完整参数，首个 poll 为 801“等待扫码”，
+未触发 eapi 回退。实现细节、官方页面观测和 `ydDeviceToken` 限制记录在
+`docs/login-protocol.md`。**真实扫码成功路径仍需用户复测**；在 `auth.json`
+出现 0600 的 `MUSIC_U` 之前，不能声称真实账号登录已通过。
 
 ## 5.1 未完成的真实账号验收
 

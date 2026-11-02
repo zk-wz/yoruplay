@@ -220,6 +220,7 @@ pub enum RequestKind {
     QrStart,
     QrPoll {
         key: String,
+        chain_id: String,
     },
     Logout,
     Generic {
@@ -656,7 +657,7 @@ impl App {
                     }
                 }
             }
-            RequestKind::QrPoll { key } => {
+            RequestKind::QrPoll { key, chain_id: _ } => {
                 self.qr_poll_inflight = false;
                 match result {
                     Ok(CommandResult::QrStatus { status, message }) => {
@@ -781,16 +782,20 @@ impl App {
         if matches!(self.detail, Detail::Loading { .. }) {
             self.dirty = true;
         }
-        let qr_key = self
+        let qr = self
             .login
             .as_ref()
-            .and_then(|login| login.qr.as_ref().map(|qr| qr.key.clone()));
-        if let Some(key) = qr_key {
+            .and_then(|login| login.qr.as_ref())
+            .map(|qr| (qr.key.clone(), qr.chain_id.clone()));
+        if let Some((key, chain_id)) = qr {
             if !self.qr_poll_inflight && self.last_qr_poll.elapsed() >= Duration::from_secs(2) {
                 self.qr_poll_inflight = true;
                 self.last_qr_poll = Instant::now();
-                let kind = RequestKind::QrPoll { key: key.clone() };
-                self.send(kind, Command::LoginQrPoll { key });
+                let kind = RequestKind::QrPoll {
+                    key: key.clone(),
+                    chain_id: chain_id.clone(),
+                };
+                self.send(kind, Command::LoginQrPoll { key, chain_id });
             }
         }
     }

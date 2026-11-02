@@ -90,15 +90,32 @@ systemctl --user enable yoruplay
 The unit runs `yoruplay daemon` as your user, restarts on failure and is never a
 system/root service. The reference unit is also in `systemd/yoruplay.service`.
 
+Stop the background daemon at any time, whether it was auto-started by the TUI
+or started by systemd:
+
+```sh
+yoruplay shutdown        # alias: yoruplay quit
+```
+
+This sends a graceful IPC shutdown, saves the queue and reaps mpv. It also
+handles a daemon from an older protocol version (for example during an upgrade)
+and falls back to `systemctl --user stop` if the unit is active but unreachable.
+It is idempotent when nothing is running. `yoruplay stop` still means “stop
+playback”; `yoruplay service stop` is the systemd-only alternative. Closing the
+TUI with `q` does not stop the daemon.
+
 ## First login
 
 ```sh
 yoruplay login
 ```
 
-A Unicode QR is printed in the terminal. The QR URL uses the web-login
-`chainId` format from upstream (the same flow as the official web QR page).
-Scan it with the NetEase Cloud Music app and confirm. For SSH or terminals too
+A Unicode QR is printed in the terminal. It uses NetEase's current web login
+endpoint (`/st/platform/scanlogin`) with a web `chainId`, web request headers
+and `type=1`, matching the official `https://music.163.com/login` page. Scan it
+with the NetEase Cloud Music app and confirm. The wire-level details and the
+history of the old failed flow are in
+[`docs/login-protocol.md`](docs/login-protocol.md). For SSH or terminals too
 small for a QR, write an SVG:
 
 ```sh
@@ -118,8 +135,9 @@ for this reason. Credentials are stored in
 contain only a stable device identity (no cookie), so repeated QR attempts do
 not look like a new device every time.
 
-If NetEase says the device environment is abnormal / returns risk code 8821,
-this is NetEase risk control rather than an account ban. Try:
+If NetEase still says the device environment is abnormal / returns risk code
+8821, the current web protocol is already in use; the remaining causes are
+network/risk-control related rather than the old `/login?codekey` URL. Try:
 
 1. Route `music.163.com`, `interfacepc.music.163.com` and `*.126.net` directly
    in Clash, or temporarily disable TUN/proxy.
@@ -193,6 +211,7 @@ yoruplay liked
 yoruplay recent
 yoruplay cache clear
 yoruplay doctor
+yoruplay shutdown
 ```
 
 `--json` prints the daemon response as JSON for scripting:

@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use yoruplay_core::cache::FileCache;
 use yoruplay_core::mpv::MpvController;
-use yoruplay_ipc::IpcClient;
+use yoruplay_ipc::{shutdown_any_version, IpcClient};
 use yoruplay_protocol::{
     Command, CommandResult, Config, ErrorInfo, Paths, PlayMode, PlaylistKind, PlaylistTracks,
     QrLoginStatus, SearchItems, SearchKind, SearchPage, Song, SongsView, StateSnapshot,
@@ -36,6 +36,9 @@ enum CliCommand {
     Tui,
     /// Run the background service in the foreground.
     Daemon,
+    /// Stop the background daemon and save playback state.
+    #[command(alias = "quit")]
+    Shutdown,
     /// Show daemon, login and playback status.
     Status,
     /// Resume or start playback.
@@ -203,6 +206,7 @@ async fn main() -> Result<()> {
 
 async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Config) -> Result<()> {
     match command {
+        CliCommand::Shutdown => shutdown_daemon(&paths, json).await,
         CliCommand::Status => {
             let result = send(&paths, Command::GetState).await?;
             if json {
@@ -427,6 +431,66 @@ async fn send(paths: &Paths, command: Command) -> Result<CommandResult> {
     Ok(result)
 }
 
+/// Stop the daemon whether it was auto-started by YoruPlay or by the systemd
+/// user unit. The IPC shutdown path is preferred because it saves the queue and
+/// reaps mpv; `systemctl stop` is only a fallback for an unresponsive unit.
+async fn shutdown_daemon(paths: &Paths, json: bool) -> Result<()> {
+    let message = match IpcClient::connect(paths.socket_file()).await {
+        Ok(client) => {
+            client.request(Command::Shutdown).await.map_err(ipc_error)?;
+            client.close().await;
+            if wait_for_socket_removal(paths, Duration::from_secs(10)).await {
+                "Daemon stopped."
+            } else {
+                bail!(
+                    "the daemon accepted shutdown but did not exit; try `systemctl --user stop yoruplay`"
+                );
+            }
+        }
+        Err(_) => {
+            // An older daemon (for example protocol v1 during an upgrade)
+            // rejects the normal handshake. Its shutdown command still has the
+            // same wire shape, so stop it before falling back to systemd.
+            if shutdown_any_version(paths.socket_file()).await.is_ok() {
+                if !wait_for_socket_removal(paths, Duration::from_secs(10)).await {
+                    bail!("the daemon accepted shutdown but did not exit");
+                }
+                "Daemon stopped."
+            } else {
+                let active = systemctl_quiet(&["is-active", "--quiet", "yoruplay"])
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                if active {
+                    systemctl(&["stop", "yoruplay"])?;
+                    if !wait_for_socket_removal(paths, Duration::from_secs(10)).await {
+                        bail!("systemd stopped the unit but the daemon socket is still present");
+                    }
+                    "Daemon stopped (systemd user service)."
+                } else {
+                    "Daemon is not running."
+                }
+            }
+        }
+    };
+    if json {
+        print_json(&CommandResult::ack_msg(message))?;
+    } else {
+        println!("{message}");
+    }
+    Ok(())
+}
+
+async fn wait_for_socket_removal(paths: &Paths, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if !paths.socket_file().exists() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    !paths.socket_file().exists()
+}
+
 async fn ack(paths: &Paths, command: Command, json: bool) -> Result<()> {
     let result = send(paths, command).await?;
     if json {
@@ -569,6 +633,7 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
             let result = client
                 .request(Command::LoginQrPoll {
                     key: qr.key.clone(),
+                    chain_id: qr.chain_id.clone(),
                 })
                 .await
                 .map_err(ipc_error)?;

@@ -88,7 +88,9 @@ events rather than blocking playback.
 Commands cover state, login, library browsing, search, playback, seek, volume,
 mode, queue mutations, cache clear and shutdown. Playback commands return only
 after the daemon has accepted the state update; network loads are serialised and
-superseded loads are discarded.
+superseded loads are discarded. `yoruplay shutdown` sends `Shutdown` through the
+normal client, with a raw version-tolerant handshake for an older daemon during
+an upgrade, then waits for the socket to disappear.
 
 ## Persistence and cache
 

@@ -498,8 +498,8 @@ impl Daemon {
                 *self.inner.pending_qr.lock().await = Some(qr.clone());
                 Ok(CommandResult::Qr(qr))
             }
-            Command::LoginQrPoll { key } => {
-                let result = self.inner.api.poll_qr_login(&key).await?;
+            Command::LoginQrPoll { key, chain_id } => {
+                let result = self.inner.api.poll_qr_login(&key, &chain_id).await?;
                 if result.status == QrLoginStatus::Success
                     || result.status == QrLoginStatus::Expired
                 {

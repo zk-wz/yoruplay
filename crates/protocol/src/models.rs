@@ -436,6 +436,10 @@ pub enum QrLoginStatus {
 pub struct QrLogin {
     pub key: String,
     pub url: String,
+    /// Web login chain id. It must be sent back with every QR poll so the
+    /// server can bind the scan to the browser-like login that created it.
+    #[serde(default)]
+    pub chain_id: String,
 }
 
 impl Song {
