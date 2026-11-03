@@ -120,11 +120,6 @@ enum CliCommand {
         #[command(subcommand)]
         command: CacheCommand,
     },
-    /// Install or control the systemd user service.
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
-    },
     /// Check mpv, PipeWire, the daemon, MPRIS and file permissions.
     Doctor,
     /// Print log locations and follow commands.
@@ -165,18 +160,6 @@ enum CacheCommand {
     Clear,
     /// Show cache size and configuration.
     Info,
-}
-
-#[derive(Subcommand, Debug)]
-enum ServiceCommand {
-    /// Write the user unit and reload systemd (does not enable it).
-    Install,
-    /// Stop, disable and remove the user unit.
-    Uninstall,
-    Start,
-    Stop,
-    Restart,
-    Status,
 }
 
 #[tokio::main]
@@ -406,7 +389,6 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
             Ok(())
         }
         CliCommand::Cache { command } => cache_command(command, &paths, &config).await,
-        CliCommand::Service { command } => service_command(command, &paths, &config).await,
         CliCommand::Doctor => doctor(&paths, &config).await,
         CliCommand::Logs => {
             println!("Daemon logs: journalctl --user -u yoruplay -f");
@@ -431,9 +413,8 @@ async fn send(paths: &Paths, command: Command) -> Result<CommandResult> {
     Ok(result)
 }
 
-/// Stop the daemon whether it was auto-started by YoruPlay or by the systemd
-/// user unit. The IPC shutdown path is preferred because it saves the queue and
-/// reaps mpv; `systemctl stop` is only a fallback for an unresponsive unit.
+/// Stop the daemon. IPC shutdown saves the queue and reaps mpv; the raw
+/// handshake is only for an older daemon during an upgrade.
 async fn shutdown_daemon(paths: &Paths, json: bool) -> Result<()> {
     let message = match IpcClient::connect(paths.socket_file()).await {
         Ok(client) => {
@@ -442,33 +423,17 @@ async fn shutdown_daemon(paths: &Paths, json: bool) -> Result<()> {
             if wait_for_socket_removal(paths, Duration::from_secs(10)).await {
                 "Daemon stopped."
             } else {
-                bail!(
-                    "the daemon accepted shutdown but did not exit; try `systemctl --user stop yoruplay`"
-                );
+                bail!("the daemon accepted shutdown but did not exit");
             }
         }
         Err(_) => {
-            // An older daemon (for example protocol v1 during an upgrade)
-            // rejects the normal handshake. Its shutdown command still has the
-            // same wire shape, so stop it before falling back to systemd.
             if shutdown_any_version(paths.socket_file()).await.is_ok() {
                 if !wait_for_socket_removal(paths, Duration::from_secs(10)).await {
                     bail!("the daemon accepted shutdown but did not exit");
                 }
                 "Daemon stopped."
             } else {
-                let active = systemctl_quiet(&["is-active", "--quiet", "yoruplay"])
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if active {
-                    systemctl(&["stop", "yoruplay"])?;
-                    if !wait_for_socket_removal(paths, Duration::from_secs(10)).await {
-                        bail!("systemd stopped the unit but the daemon socket is still present");
-                    }
-                    "Daemon stopped (systemd user service)."
-                } else {
-                    "Daemon is not running."
-                }
+                "Daemon is not running."
             }
         }
     };
@@ -517,7 +482,7 @@ async fn connect(paths: &Paths) -> Result<IpcClient> {
     IpcClient::connect(paths.socket_file()).await.map_err(|e| {
         let info = e.to_error_info();
         anyhow!(
-            "{}\n\nStart it with `yoruplay daemon` or `systemctl --user start yoruplay`.",
+            "{}\n\nStart it with `yoruplay daemon` or open the TUI, which auto-starts it.",
             info.message
         )
     })
@@ -736,104 +701,6 @@ async fn cache_command(command: CacheCommand, paths: &Paths, config: &Config) ->
     }
 }
 
-async fn service_command(command: ServiceCommand, paths: &Paths, config: &Config) -> Result<()> {
-    match command {
-        ServiceCommand::Install => service_install(paths),
-        ServiceCommand::Uninstall => service_uninstall(paths, config).await,
-        ServiceCommand::Start => systemctl(&["start", "yoruplay"]),
-        ServiceCommand::Stop => systemctl(&["stop", "yoruplay"]),
-        ServiceCommand::Restart => systemctl(&["restart", "yoruplay"]),
-        ServiceCommand::Status => systemctl(&["status", "yoruplay", "--no-pager"]),
-    }
-}
-
-fn service_unit_path(paths: &Paths) -> PathBuf {
-    paths
-        .config_dir
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("systemd/user/yoruplay.service")
-}
-
-fn service_install(paths: &Paths) -> Result<()> {
-    let exe = std::env::current_exe().context("locate the yoruplay executable")?;
-    let unit_path = service_unit_path(paths);
-    if let Some(parent) = unit_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let unit = format!(
-        r#"[Unit]
-Description=YoruPlay background music service
-After=pipewire-pulse.service wireplumber.service
-Wants=pipewire-pulse.service
-
-[Service]
-Type=simple
-ExecStart="{}" daemon
-Restart=on-failure
-RestartSec=2
-TimeoutStopSec=10
-NoNewPrivileges=true
-
-[Install]
-WantedBy=default.target
-"#,
-        exe.display()
-    );
-    fs::write(&unit_path, unit).with_context(|| format!("write {}", unit_path.display()))?;
-    fs::set_permissions(&unit_path, fs::Permissions::from_mode(0o644))?;
-    systemctl(&["daemon-reload"])?;
-    println!("Installed {}", unit_path.display());
-    println!("It is NOT enabled at login. Start it with:");
-    println!("  systemctl --user start yoruplay");
-    println!("Optional autostart: systemctl --user enable yoruplay");
-    Ok(())
-}
-
-async fn service_uninstall(paths: &Paths, config: &Config) -> Result<()> {
-    let _ = systemctl_quiet(&["disable", "--now", "yoruplay"]);
-    let unit_path = service_unit_path(paths);
-    if unit_path.exists() {
-        fs::remove_file(&unit_path).with_context(|| format!("remove {}", unit_path.display()))?;
-    }
-    let _ = systemctl_quiet(&["daemon-reload"]);
-    if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
-        let _ = client.request(Command::Shutdown).await;
-        client.close().await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-    let _ = fs::remove_file(paths.socket_file());
-    let _ = fs::remove_file(paths.lock_file());
-    let cache = FileCache::new(paths.cache_dir.clone(), config.cache.max_mb);
-    let _ = cache.clear();
-    println!("Removed the systemd user unit, runtime socket and cache.");
-    println!(
-        "Preserved credentials and configuration: {} and {}",
-        paths.auth_file().display(),
-        paths.config_file().display()
-    );
-    Ok(())
-}
-
-fn systemctl(args: &[&str]) -> Result<()> {
-    let status = ProcessCommand::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .status()
-        .context("run systemctl --user")?;
-    if !status.success() {
-        bail!("systemctl --user {} failed ({status})", args.join(" "));
-    }
-    Ok(())
-}
-
-fn systemctl_quiet(args: &[&str]) -> io::Result<std::process::ExitStatus> {
-    ProcessCommand::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .status()
-}
-
 async fn doctor(paths: &Paths, config: &Config) -> Result<()> {
     println!("YoruPlay {}", env!("CARGO_PKG_VERSION"));
     println!("Config: {}", paths.config_file().display());
@@ -904,9 +771,17 @@ async fn uninstall(paths: &Paths, config: &Config, yes: bool, remove_binary: boo
         );
     }
     let current = std::env::current_exe().ok();
-    service_uninstall(paths, config).await?;
+    if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
+        let _ = client.request(Command::Shutdown).await;
+        client.close().await;
+        let _ = wait_for_socket_removal(paths, Duration::from_secs(5)).await;
+    }
+    let _ = fs::remove_file(paths.socket_file());
+    let _ = fs::remove_file(paths.lock_file());
+    let cache = FileCache::new(paths.cache_dir.clone(), config.cache.max_mb);
+    let _ = cache.clear();
     println!(
-        "Preserved account and configuration files. Remove them manually only if you are sure:"
+        "Removed runtime socket, lock and cache. Preserved account and configuration files. Remove them manually only if you are sure:"
     );
     println!("  {}", paths.auth_file().display());
     println!("  {}", paths.config_file().display());

@@ -57,7 +57,7 @@ Secrets:
 5. `yoruplay start-playlist <id>`, then test all five modes.
 6. `busctl --user monitor org.mpris.MediaPlayer2.yoruplay` while using Noctalia.
 7. Close the TUI while playing; reopen and verify reconnection.
-8. `systemctl --user stop yoruplay` and verify mpv is reaped.
+8. `yoruplay shutdown` and verify mpv is reaped.
 
 ## Upstream sync
 

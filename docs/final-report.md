@@ -14,11 +14,10 @@ YoruPlay 已实现为一个 Rust workspace，包含：
 - 系统 PATH 中 mpv 的 JSON IPC 控制器（不链接 libmpv）
 - MPRIS 2.2（`org.mpris.MediaPlayer2.yoruplay`）
 - Ratatui + Crossterm TUI、CLI、浏览器 Cookie 登录、Cookie stdin 导入
-- state/auth 原子持久化、受限缓存、systemd 用户服务、安装/卸载文档
+- state/auth 原子持久化、受限缓存、安装/卸载文档
 
-release 二进制已安装到 `~/.local/bin/yoruplay`。systemd 用户服务已写入
-`~/.config/systemd/user/yoruplay.service`，服务当前运行中，但**未启用开机自启**
-（`UnitFileState=disabled`）。
+release 二进制已安装到 `~/.local/bin/yoruplay`。项目不安装 systemd unit、
+开机自启项或其他系统注册；TUI/CLI 会按需拉起 daemon。
 
 ## 2. 架构与技术取舍
 
@@ -161,8 +160,7 @@ yoruplay login
 打开官方页面、`i` 导入 Firefox Cookie。
 
 `yoruplay shutdown`（别名 `quit`）保持可用：通过 IPC 优雅关闭 daemon、保存
-队列并回收 mpv；兼容旧协议 daemon 的 shutdown 握手，systemd 单元无响应时
-回退到 `systemctl --user stop`。
+队列并回收 mpv；兼容旧协议 daemon 的 shutdown 握手。
 
 ## 5.1 真实账号验证结果
 
@@ -220,12 +218,11 @@ cedd914 fix: harden MPRIS signals, persistence and TUI edge cases
 在用户权限下完成：
 
 - 安装 `~/.local/bin/yoruplay`（release）
-- 写入 `~/.config/systemd/user/yoruplay.service`，**未 enable**
+- 不安装 systemd unit、不自启、不修改 PATH
 - 创建/使用 `~/.config/yoruplay/config.toml`、
   `~/.local/share/yoruplay/state.json`、`$XDG_RUNTIME_DIR/yoruplay/`
-- 当前服务 `active`、`UnitFileState=disabled`
-- 测试队列已清空、缓存已清空、`auth.json` 仅含设备身份（无 `MUSIC_U`）、
-  无 mpv 残留
+- daemon 由 TUI/CLI 按需拉起；测试结束已停止播放
+- 测试队列、缓存和账号状态按实际使用保留
 
 未修改：内核、UKI、Secure Boot、PAM/sudoers、系统音频服务、RTKit 限制、
 系统网络/代理、其他应用配置、开机启动状态。未使用 root。
@@ -237,13 +234,8 @@ yoruplay login          # 打开官方登录页并导入 Firefox Cookie
 yoruplay                # TUI
 yoruplay status
 yoruplay fm / daily / radar / liked / recent / search ...
-systemctl --user start|stop|restart yoruplay
-```
-
-可选启用开机自启（默认不做）：
-
-```sh
-systemctl --user enable yoruplay
+yoruplay daemon         # 可选：前台运行
+yoruplay shutdown       # 关闭当前 daemon
 ```
 
 详见 `README.md`、`docs/architecture.md`、`docs/upstream-api-map.md`、

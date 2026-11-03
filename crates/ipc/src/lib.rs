@@ -51,7 +51,7 @@ impl IpcError {
     pub fn to_error_info(&self) -> ErrorInfo {
         let hint = match self {
             IpcError::Connect(_) => Some(
-                "Start the daemon with `yoruplay daemon` or `systemctl --user start yoruplay`.",
+                "Start the daemon with `yoruplay daemon` or open the TUI, which auto-starts it.",
             ),
             IpcError::VersionMismatch { .. } => {
                 Some("Restart the daemon and TUI from the same YoruPlay build.")

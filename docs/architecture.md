@@ -25,7 +25,7 @@ MPRIS (zbus) ───┘            │
 | `yoruplay-ipc` | Async Unix-socket client used by TUI and CLI. |
 | `yoruplay-core` | Queue, mpv controller, persistence, cache, daemon socket server, MPRIS. |
 | `yoruplay-tui` | Ratatui UI, responsive layout, Firefox login import, i18n labels. |
-| `yoruplay` (binary) | CLI dispatch, logging, daemon auto-start, service install/uninstall. |
+| `yoruplay` (binary) | CLI dispatch, logging, daemon auto-start and graceful shutdown. |
 
 The API crate never touches playback. The TUI never touches mpv or NetEase
 directly. MPRIS calls the same `Daemon::handle_command` path as the TUI/CLI, so

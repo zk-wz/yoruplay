@@ -65,45 +65,27 @@ unit (without enabling it):
 `Cargo.lock` is committed. `cargo fmt --check`, `cargo clippy` and `cargo test`
 must pass before a release build.
 
-## Install the user service
+## Run the daemon
 
-The daemon can be started manually:
+The TUI auto-starts a daemon if none is running. To run it in the foreground:
 
 ```sh
 yoruplay daemon
 ```
 
-For a user service:
+YoruPlay does not install a systemd unit, autostart entry, or any other system
+registration. The binary is installed at `~/.local/bin/yoruplay`; command
+resolution depends only on your existing `PATH`.
 
-```sh
-yoruplay service install     # writes ~/.config/systemd/user/yoruplay.service
-systemctl --user start yoruplay
-systemctl --user status yoruplay
-```
-
-`service install` intentionally does **not** enable login autostart. If you want
-it:
-
-```sh
-systemctl --user enable yoruplay
-```
-
-The unit runs `yoruplay daemon` as your user, restarts on failure and is never a
-system/root service. The reference unit is also in `systemd/yoruplay.service`.
-
-Stop the background daemon at any time, whether it was auto-started by the TUI
-or started by systemd:
+Stop the background daemon at any time:
 
 ```sh
 yoruplay shutdown        # alias: yoruplay quit
 ```
 
-This sends a graceful IPC shutdown, saves the queue and reaps mpv. It also
-handles a daemon from an older protocol version (for example during an upgrade)
-and falls back to `systemctl --user stop` if the unit is active but unreachable.
-It is idempotent when nothing is running. `yoruplay stop` still means “stop
-playback”; `yoruplay service stop` is the systemd-only alternative. Closing the
-TUI with `q` does not stop the daemon.
+This sends a graceful IPC shutdown, saves the queue and reaps mpv. It is
+idempotent when nothing is running. `yoruplay stop` means “stop playback”.
+Closing the TUI with `q` does not stop the daemon.
 
 ## First login
 
@@ -317,8 +299,8 @@ logged.
 git pull
 cargo build --release
 install -Dm755 target/release/yoruplay ~/.local/bin/yoruplay
-systemctl --user restart yoruplay   # if using the service
-yoruplay service install            # refresh the unit if needed
+yoruplay shutdown                   # stop any running daemon
+# start the TUI, or run `yoruplay daemon` manually
 ```
 
 ## Uninstall

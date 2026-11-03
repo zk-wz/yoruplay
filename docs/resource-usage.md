@@ -63,8 +63,8 @@ and cgroup accounting, while the PSS sum is ≈66 MiB.
   (`loop-file=inf`), sequential advances then stops at the last queue entry.
 - Shuffle next/previous uses history; rapid next commands leave a consistent
   final track.
-- Queue and mode/volume persistence across daemon restart; service stop reaps
-  mpv and removes the socket; service restart restores queue and position.
+- Queue and mode/volume persistence across daemon restart; `yoruplay shutdown`
+  reaps mpv and removes the socket; restart restores queue and position.
 - TUI search (anonymous), queue view, help overlay, login panel,
   responsive single-column layout, exit while playing, reconnection to the
   running daemon, English/Chinese label unit checks.

@@ -17,17 +17,9 @@ fi
 cargo build --release
 install -Dm755 target/release/yoruplay "$HOME/.local/bin/yoruplay"
 
-if [[ "${1:-}" != "--no-service" ]]; then
-    "$HOME/.local/bin/yoruplay" service install
-fi
-
 cat <<MSG
 
-Installed $HOME/.local/bin/yoruplay
-The user service was written but NOT enabled at login.
-Start it with:
-  systemctl --user start yoruplay
-
-Open the TUI with:
-  yoruplay
+Installed "$HOME/.local/bin/yoruplay"
+No systemd unit or autostart entry was created.
+The TUI auto-starts the daemon; use `yoruplay daemon` for a foreground daemon.
 MSG
