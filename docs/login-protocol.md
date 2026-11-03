@@ -137,10 +137,15 @@ If a future scan still fails:
    status. `8821` is risk control, not an account ban.
 3. Route `music.163.com`, `interfacepc.music.163.com`, `interface3.music.163.com`
    and `*.126.net` directly if Clash/TUN is active.
-4. As a last resort, log in on the official web page and import `MUSIC_U`:
+4. Log in on the official web page and import `MUSIC_U`. This path was verified
+   with a Firefox session on 2026-11-03:
 
    ```sh
-   printf '%s\n' "MUSIC_U=..." | yoruplay login --cookie-stdin
+   yoruplay login --cookie-stdin
+   # paste MUSIC_U=...; __csrf=... then press Ctrl-D
    ```
 
-Never paste a cookie or `MUSIC_U` into logs, shell arguments or chat.
+   Firefox stores cookies in `~/.config/mozilla/firefox/<profile>/cookies.sqlite`
+   on Arch. The database is locked while Firefox is running; use a read-only
+   copy if extracting manually. Never paste a cookie or `MUSIC_U` into logs,
+   shell arguments or chat.

@@ -14,12 +14,17 @@
   empty value (the same fallback used by other native clients when unavailable).
   If NetEase makes a non-empty token mandatory, QR login will need a WebView or
   browser helper; cookie import remains available.
-- **Real-account verification gap**: the delivered run had no completed QR
-  login. Account-only endpoints and Heartbeat's recommendation response were not
-  exercised against a real account. Everything below that depends on account
-  authorization must be treated as implemented-but-unverified until the user
-  runs `yoruplay login` and the verification suite in
-  `crates/api/tests/live_account.rs`.
+- **Real-account verification status**: an existing Firefox `MUSIC_U` session
+  was imported with `yoruplay login --cookie-stdin`; the account profile,
+  created/subscribed playlists, liked songs, daily songs/playlists, Personal FM,
+  recent history, search, stream URL and lyrics were verified read-only with
+  `crates/api/tests/live_account.rs`. The QR success callback itself is still
+  unverified. Heartbeat returned `不支持该歌单类型` for the tested created
+  playlist, so its real-account path remains unverified.
+- **Private Radar variability**: the radar playlist appears in some
+  `/api/v1/discovery/recommend/resource` responses but not every call. The
+  daemon caches the daily playlist list; the direct API test can see a later
+  response without the radar entry and report it as absent.
 - **Private Radar discovery**: there is no separate radar module in the current
   upstream API. YoruPlay searches the account's daily recommended playlists for
   a name containing `私人雷达` / `Private Radar`. If NetEase changes that naming

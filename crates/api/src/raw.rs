@@ -23,7 +23,7 @@ where
 pub struct RawArtist {
     #[serde(default)]
     pub id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub name: String,
     #[serde(default, alias = "picUrl")]
     pub pic_url: Option<String>,
@@ -37,7 +37,7 @@ pub struct RawArtist {
 pub struct RawAlbum {
     #[serde(default)]
     pub id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub name: String,
     #[serde(default, alias = "picUrl")]
     pub pic_url: Option<String>,
@@ -73,7 +73,7 @@ pub struct RawPrivilege {
 pub struct RawSong {
     #[serde(default)]
     pub id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub name: String,
     #[serde(default, rename = "ar")]
     pub ar: Option<Vec<RawArtist>>,
@@ -151,7 +151,7 @@ impl RawSong {
 pub struct RawCreator {
     #[serde(default, alias = "userId")]
     pub user_id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub nickname: String,
 }
 
@@ -165,7 +165,7 @@ pub struct RawTrackId {
 pub struct RawPlaylist {
     #[serde(default)]
     pub id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub name: String,
     #[serde(default, alias = "coverImgUrl")]
     pub cover_img_url: Option<String>,
@@ -185,9 +185,9 @@ pub struct RawPlaylist {
     pub play_count: u64,
     #[serde(default, alias = "updateTime")]
     pub update_time: u64,
-    #[serde(default, alias = "trackIds")]
+    #[serde(default, alias = "trackIds", deserialize_with = "null_to_default")]
     pub track_ids: Vec<RawTrackId>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub tracks: Vec<RawSong>,
 }
 
@@ -255,7 +255,7 @@ impl RawPlaylist {
 pub struct RawProfile {
     #[serde(default, alias = "userId")]
     pub user_id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub nickname: String,
     #[serde(default, alias = "avatarUrl")]
     pub avatar_url: Option<String>,
@@ -464,7 +464,7 @@ pub struct UserPlaylistsResponse {
     pub code: i64,
     #[serde(default)]
     pub more: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub playlist: Vec<RawPlaylist>,
 }
 
@@ -613,6 +613,13 @@ mod tests {
         let summary = raw.into_summary();
         assert_eq!(summary.name, "热歌榜");
         assert!(summary.track_count >= ids.len() as u64);
+    }
+
+    #[test]
+    fn user_playlists_accept_null_list() {
+        let response: UserPlaylistsResponse =
+            serde_json::from_str(r#"{"code":200,"more":false,"playlist":null}"#).unwrap();
+        assert!(response.playlist.is_empty());
     }
 
     #[test]
