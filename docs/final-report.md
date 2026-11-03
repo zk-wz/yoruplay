@@ -199,6 +199,8 @@ cargo test -p yoruplay-api --test live_smoke -- --ignored --nocapture
 ## 6. Git 提交
 
 ```text
+434c705 perf: bound playlist cache and tighten mpv buffering
+d2a3ca7 fix(cli): clean login prompt output
 133085e feat(auth): replace QR login with Firefox cookie import
 e3cacdd fix(api): tolerate null arrays in real account responses
 dcb6e0a docs: record QR login follow-up and shutdown command
