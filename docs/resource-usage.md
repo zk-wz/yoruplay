@@ -63,7 +63,7 @@ figure. Page cache is excluded from PSS.
   (`loop-file=inf`), sequential advances then stops at the last queue entry.
 - Shuffle next/previous uses history; rapid next commands leave a consistent
   final track.
-- Queue and mode/volume persistence across daemon restart; `yoruplay shutdown`
+- Queue and mode/volume persistence across daemon restart; `yoruplay daemon stop`
   reaps mpv and removes the socket; restart restores queue and position.
 - TUI search (anonymous), queue view, help overlay, login panel,
   responsive single-column layout, exit while playing, reconnection to the

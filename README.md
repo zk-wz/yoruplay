@@ -8,7 +8,7 @@ daemon:
 - **TUI** (Ratatui + Crossterm) for browsing and selecting music.
 - **CLI** for scripting and day-to-day control.
 - **MPRIS** for Noctalia Media and other Linux desktop media controllers.
-- **Core daemon** (`yoruplay daemon`) owns the queue, NetEase session, stream
+- **Core daemon** (`yoruplay daemon start`) owns the queue, NetEase session, stream
   URLs and the system `mpv` child process.
 
 The TUI exits without stopping playback. Reopen it later and it reconnects to
@@ -55,8 +55,7 @@ cargo build --release
 install -Dm755 target/release/yoruplay ~/.local/bin/yoruplay
 ```
 
-Or use the helper, which checks mpv, installs the binary and writes the user
-unit (without enabling it):
+Or use the helper, which checks mpv and installs the binary:
 
 ```sh
 ./scripts/install.sh
@@ -67,30 +66,31 @@ must pass before a release build.
 
 ## Run the daemon
 
-The TUI auto-starts a daemon if none is running. To run it in the foreground:
+The TUI auto-starts a daemon if none is running. To start it explicitly:
 
 ```sh
-yoruplay daemon
+yoruplay daemon start
 ```
 
-YoruPlay does not install a systemd unit, autostart entry, or any other system
+`yoruplay daemon` without a subcommand prints the daemon help tree. YoruPlay
+does not install a systemd unit, autostart entry, or any other system
 registration. The binary is installed at `~/.local/bin/yoruplay`; command
 resolution depends only on your existing `PATH`.
 
 Stop the background daemon at any time:
 
 ```sh
-yoruplay shutdown        # alias: yoruplay quit
+yoruplay daemon stop
 ```
 
 This sends a graceful IPC shutdown, saves the queue and reaps mpv. It is
-idempotent when nothing is running. `yoruplay stop` means “stop playback”.
+idempotent when nothing is running. `yoruplay control stop` only stops playback.
 Closing the TUI with `q` does not stop the daemon.
 
 ## First login
 
 ```sh
-yoruplay login
+yoruplay auth login
 ```
 
 If Firefox already has a valid `MUSIC_U` session, this imports it immediately
@@ -101,7 +101,7 @@ mode `0600`. Only when no valid Firefox session exists does it open
 To change accounts, force the browser flow:
 
 ```sh
-yoruplay login --switch-account   # alias: --force
+yoruplay auth login --switch-account   # alias: --force
 ```
 
 This opens the official page and waits until Firefox holds a different account
@@ -118,7 +118,7 @@ page and `i` to import the Firefox cookie.
 Manual Cookie import (any browser):
 
 ```sh
-yoruplay login --cookie-stdin
+yoruplay auth login --cookie-stdin
 # paste MUSIC_U=...; __csrf=... and press Ctrl-D
 ```
 
@@ -126,7 +126,7 @@ Or from a protected file:
 
 ```sh
 chmod 600 ~/netease-cookie.txt
-yoruplay login --cookie-stdin < ~/netease-cookie.txt
+yoruplay auth login --cookie-stdin < ~/netease-cookie.txt
 ```
 
 The header must contain `MUSIC_U=...`; `__csrf=...` is recommended. Do not put
@@ -140,7 +140,7 @@ in [`docs/login.md`](docs/login.md).
 Logout removes the saved session:
 
 ```sh
-yoruplay logout
+yoruplay auth logout
 ```
 
 ## Use
@@ -148,11 +148,11 @@ yoruplay logout
 Open the TUI:
 
 ```sh
-yoruplay
-# or: yoruplay tui
+yoruplay tui
 ```
 
-The TUI auto-starts a daemon if one is not already running. It auto-connects to
+Running `yoruplay` without a command prints the command tree. The TUI
+auto-starts a daemon if one is not already running. It auto-connects to
 an existing daemon. Closing the TUI (`q`) does not stop playback.
 
 Common keys:
@@ -180,35 +180,36 @@ playlists are rendered as a virtual viewport; only visible rows are built.
 CLI examples:
 
 ```sh
-yoruplay status
-yoruplay play
-yoruplay pause
-yoruplay next
-yoruplay previous
-yoruplay mode intelligence
-yoruplay mode                # cycle modes
-yoruplay volume 65
-yoruplay seek +10
-yoruplay queue
+yoruplay daemon start
+yoruplay daemon status
+yoruplay daemon stop
+yoruplay control resume
+yoruplay control pause
+yoruplay control next
+yoruplay control previous
+yoruplay control mode intelligence
+yoruplay control mode             # cycle modes
+yoruplay control volume 65
+yoruplay control seek +10
+yoruplay queue list
 yoruplay search "晴天" --kind songs
-yoruplay playlist 3778678
-yoruplay start-playlist 3778678 --start 0
-yoruplay add-playlist 3778678
-yoruplay daily
-yoruplay daily-playlists --refresh
-yoruplay radar
-yoruplay fm
-yoruplay liked
-yoruplay recent
+yoruplay library playlist 3778678
+yoruplay queue start-playlist 3778678 --start 0
+yoruplay queue add-playlist 3778678
+yoruplay library daily
+yoruplay library daily-playlists --refresh
+yoruplay library radar
+yoruplay library fm
+yoruplay library liked
+yoruplay library recent
 yoruplay cache clear
 yoruplay doctor
-yoruplay shutdown
 ```
 
 `--json` prints the daemon response as JSON for scripting:
 
 ```sh
-yoruplay --json status
+yoruplay --json daemon status
 yoruplay --json search "Jay" --kind artists
 ```
 
@@ -269,8 +270,9 @@ level = "info"
 ```
 
 Daily recommendations and lyrics are cached briefly (6 hours for daily data,
-configurable TTL for lyrics); no audio files are cached. `yoruplay cache clear`
-or `Cache::ClearCache` removes the cache. The daemon trims cache files to
+configurable TTL for lyrics); no audio files are cached yet. `yoruplay cache
+clear` removes the metadata cache. A song cache is designed but not implemented;
+see [`docs/song-cache.md`](docs/song-cache.md). The daemon trims cache files to
 `cache.max_mb` after writes.
 
 The JSON cache and state files are written atomically. A corrupt state file is
@@ -279,7 +281,7 @@ moved aside as `state.json.corrupt-<timestamp>` so the daemon can still start.
 ## Logs
 
 The daemon logs to `~/.cache/yoruplay/yoruplay.log` when started by the TUI/CLI.
-A foreground `yoruplay daemon` logs to stderr:
+The daemon logs to the file below:
 
 ```sh
 tail -f ~/.cache/yoruplay/yoruplay.log
@@ -294,8 +296,9 @@ logged.
 git pull
 cargo build --release
 install -Dm755 target/release/yoruplay ~/.local/bin/yoruplay
-yoruplay shutdown                   # stop any running daemon
-# start the TUI, or run `yoruplay daemon` manually
+yoruplay daemon stop                # stop any running daemon
+yoruplay daemon start               # start the daemon
+# or open the TUI with `yoruplay tui`
 ```
 
 ## Uninstall
@@ -306,7 +309,7 @@ yoruplay uninstall --yes
 yoruplay uninstall --yes --remove-binary
 ```
 
-This removes the user unit, runtime socket/lock and cache. It never deletes
+This removes the runtime socket/lock and cache. It never deletes
 account data or configuration without an explicit manual action; the command
 prints the preserved paths. To remove them yourself:
 

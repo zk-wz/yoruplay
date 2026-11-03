@@ -42,7 +42,7 @@ Deliberate differences:
 | `liked_songs` | `likelist.js` + playlist detail | `/api/song/like/get` | eapi | Prefers the "liked music" playlist for order; falls back to unordered likelist. |
 | `daily_songs` | `recommend_songs.js` | `/api/v3/discovery/recommend/songs` | weapi | Preserves dailySongs server order; 6h cache in the daemon. |
 | `daily_playlists` | `recommend_resource.js` | `/api/v1/discovery/recommend/resource` | weapi | 6h cache. |
-| `radar` (service) | no upstream module | `/api/v1/discovery/recommend/resource` | weapi | Discovers a playlist whose name contains 私人雷达/Private Radar. Never hard-codes an ID. Explicit error if absent. |
+| `radar` discovery | no upstream module | `/api/v1/discovery/recommend/resource` | weapi | Discovers a playlist whose name contains 私人雷达/Private Radar. Never hard-codes an ID. Explicit error if absent. |
 | `personal_fm` | `personal_fm.js` | `/api/v1/radio/get` | weapi | Starts a durable Personal FM source; refills only when ≤1 track remains. |
 | `recent_songs` | `record_recent_song.js`, fallback `user_record.js` | `/api/play-record/song/list`, `/api/v1/play/record` | weapi | Server history only. Handles full-song or ID-only payloads. Label clearly says it is server data, not local YoruPlay history. |
 | `search` | `cloudsearch.js` | `/api/cloudsearch/pc` | eapi | Songs/artists/albums/playlists; `total:true`; pages capped at 100 by YoruPlay. |

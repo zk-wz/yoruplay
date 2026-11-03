@@ -51,12 +51,12 @@ Secrets:
 
 1. Build and install.
 2. `yoruplay doctor` checks mpv, PipeWire/PulseAudio, socket and MPRIS.
-3. `yoruplay login` opens the official page and imports the Firefox session.
-4. `yoruplay status`, `liked`, `daily`, `fm`, `recent`, `radar`.
-5. `yoruplay start-playlist <id>`, then test all five modes.
+3. `yoruplay auth login` imports the Firefox session (opening the official page only if needed).
+4. `yoruplay daemon status`, `yoruplay library liked`, `yoruplay library daily`, `yoruplay library fm`, `yoruplay library recent`, `yoruplay library radar`.
+5. `yoruplay queue start-playlist <id>`, then test all five modes with `yoruplay control ...`.
 6. `busctl --user monitor org.mpris.MediaPlayer2.yoruplay` while using Noctalia.
 7. Close the TUI while playing; reopen and verify reconnection.
-8. `yoruplay shutdown` and verify mpv is reaped.
+8. `yoruplay daemon stop` and verify mpv is reaped.
 
 ## Upstream sync
 

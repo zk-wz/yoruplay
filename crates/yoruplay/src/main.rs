@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use termtree::Tree;
 use yoruplay_core::cache::FileCache;
 use yoruplay_core::mpv::MpvController;
 use yoruplay_ipc::{shutdown_any_version, IpcClient};
@@ -32,21 +33,67 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum CliCommand {
-    /// Open the terminal interface (default).
     Tui,
-    /// Run the daemon in the foreground.
-    Daemon,
-    /// Stop the background daemon and save playback state.
-    #[command(alias = "quit")]
-    Shutdown,
+    /// Manage the background daemon.
+    Daemon(DaemonArgs),
+    /// Playback controls.
+    Control(ControlArgs),
+    /// Queue management.
+    Queue(QueueArgs),
+    /// Browse the NetEase library.
+    Library(LibraryArgs),
+    /// Search songs, artists, albums or playlists.
+    Search(SearchArgs),
+    /// Account login and logout.
+    Auth(AuthArgs),
+    /// Metadata cache.
+    Cache(CacheArgs),
+    /// Check mpv, PipeWire, the daemon, MPRIS and file permissions.
+    Doctor,
+    /// Print log file locations and tail commands.
+    Logs,
+    /// Remove cache and runtime state (never credentials/config).
+    Uninstall {
+        /// Confirm removal without prompting.
+        #[arg(long)]
+        yes: bool,
+        /// Also delete the installed executable when it is under HOME.
+        #[arg(long)]
+        remove_binary: bool,
+    },
+    /// Internal foreground daemon (hidden; used by `daemon start`).
+    #[command(name = "__daemon", hide = true)]
+    InternalDaemon,
+}
+
+#[derive(Args, Debug)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    action: Option<DaemonAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonAction {
+    /// Start a detached daemon and wait until its socket is ready.
+    Start,
+    /// Gracefully stop the daemon and reap mpv.
+    Stop,
     /// Show daemon, login and playback status.
     Status,
-    /// Resume or start playback.
-    Play,
+}
+
+#[derive(Args, Debug)]
+struct ControlArgs {
+    #[command(subcommand)]
+    action: Option<ControlAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ControlAction {
+    /// Start or resume playback.
+    Resume,
     /// Pause playback.
     Pause,
-    /// Toggle pause.
-    PlayPause,
     /// Stop playback and reset the position.
     Stop,
     /// Play the next track.
@@ -59,16 +106,42 @@ enum CliCommand {
     Volume { value: Option<f64> },
     /// Seek relative to the current position, in seconds (e.g. +10, -5).
     Seek { offset: String },
+}
+
+#[derive(Args, Debug)]
+struct QueueArgs {
+    #[command(subcommand)]
+    action: Option<QueueAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum QueueAction {
     /// Print the queue.
-    Queue,
-    /// Remove one queue entry by zero-based index.
-    QueueRemove { index: usize },
+    List,
     /// Play a queue entry by zero-based index.
-    QueuePlay { index: usize },
+    Play { index: usize },
+    /// Remove one queue entry by zero-based index.
+    Remove { index: usize },
     /// Clear the queue.
-    QueueClear,
-    /// Search songs, artists, albums or playlists.
-    Search(SearchArgs),
+    Clear,
+    /// Replace the queue with a playlist and start at an index.
+    StartPlaylist {
+        id: u64,
+        #[arg(long, default_value_t = 0)]
+        start: usize,
+    },
+    /// Append all songs of a playlist to the queue.
+    AddPlaylist { id: u64 },
+}
+
+#[derive(Args, Debug)]
+struct LibraryArgs {
+    #[command(subcommand)]
+    action: Option<LibraryAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum LibraryAction {
     /// List your created or subscribed playlists.
     Playlists {
         #[arg(long, default_value = "created")]
@@ -103,36 +176,34 @@ enum CliCommand {
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
-    /// Replace the queue with a playlist and start at an index.
-    StartPlaylist {
-        id: u64,
-        #[arg(long, default_value_t = 0)]
-        start: usize,
-    },
-    /// Append all songs of a playlist to the queue.
-    AddPlaylist { id: u64 },
+}
+
+#[derive(Args, Debug)]
+struct AuthArgs {
+    #[command(subcommand)]
+    action: Option<AuthAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthAction {
     /// Log in through Firefox, or import a Cookie header from stdin.
     Login(LoginArgs),
     /// Log out and remove the saved NetEase session.
     Logout,
-    /// Manage the bounded on-disk cache.
-    Cache {
-        #[command(subcommand)]
-        command: CacheCommand,
-    },
-    /// Check mpv, PipeWire, the daemon, MPRIS and file permissions.
-    Doctor,
-    /// Print log file locations and tail commands.
-    Logs,
-    /// Remove cache and runtime state (never credentials/config).
-    Uninstall {
-        /// Confirm removal without prompting.
-        #[arg(long)]
-        yes: bool,
-        /// Also delete the installed executable when it is under HOME.
-        #[arg(long)]
-        remove_binary: bool,
-    },
+}
+
+#[derive(Args, Debug)]
+struct CacheArgs {
+    #[command(subcommand)]
+    action: Option<CacheAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheAction {
+    /// Remove all cache entries.
+    Clear,
+    /// Show cache size and configuration.
+    Info,
 }
 
 #[derive(Args, Debug)]
@@ -156,21 +227,64 @@ struct LoginArgs {
     switch_account: bool,
 }
 
-#[derive(Subcommand, Debug)]
-enum CacheCommand {
-    /// Remove all cache entries.
-    Clear,
-    /// Show cache size and configuration.
-    Info,
+/// Intercept only root/parent help. Leaf commands keep clap's detailed
+/// `--help` output. Filtering `--json` keeps global option placement flexible.
+fn intercept_help() -> bool {
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| arg != "--json")
+        .collect();
+    let topic = match args.as_slice() {
+        [] => Some(HelpTopic::Root),
+        [arg] if matches!(arg.as_str(), "--help" | "-h") => Some(HelpTopic::Root),
+        [name] if name == "help" => Some(HelpTopic::Root),
+        [name] => match name.as_str() {
+            "daemon" => Some(HelpTopic::Daemon),
+            "control" => Some(HelpTopic::Control),
+            "queue" => Some(HelpTopic::Queue),
+            "library" => Some(HelpTopic::Library),
+            "auth" => Some(HelpTopic::Auth),
+            "cache" => Some(HelpTopic::Cache),
+            _ => None,
+        },
+        [name, flag] if matches!(flag.as_str(), "--help" | "-h" | "help") => match name.as_str() {
+            "daemon" => Some(HelpTopic::Daemon),
+            "control" => Some(HelpTopic::Control),
+            "queue" => Some(HelpTopic::Queue),
+            "library" => Some(HelpTopic::Library),
+            "auth" => Some(HelpTopic::Auth),
+            "cache" => Some(HelpTopic::Cache),
+            _ => None,
+        },
+        [name, sub] if name == "help" => match sub.as_str() {
+            "daemon" => Some(HelpTopic::Daemon),
+            "control" => Some(HelpTopic::Control),
+            "queue" => Some(HelpTopic::Queue),
+            "library" => Some(HelpTopic::Library),
+            "auth" => Some(HelpTopic::Auth),
+            "cache" => Some(HelpTopic::Cache),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(topic) = topic {
+        print_help(topic);
+        true
+    } else {
+        false
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if intercept_help() {
+        return Ok(());
+    }
     let cli = Cli::parse();
     let paths = Paths::discover().context("discover XDG directories")?;
-    let command = cli.command.unwrap_or(CliCommand::Tui);
+    let command = cli.command.expect("checked above");
     match command {
-        CliCommand::Daemon => {
+        CliCommand::InternalDaemon => {
             let config = load_config(&paths)?;
             init_stderr_logging(&config.log.level);
             yoruplay_core::daemon::run(paths, config).await
@@ -191,50 +305,85 @@ async fn main() -> Result<()> {
 
 async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Config) -> Result<()> {
     match command {
-        CliCommand::Shutdown => shutdown_daemon(&paths, json).await,
-        CliCommand::Status => {
-            let result = send(&paths, Command::GetState).await?;
-            if json {
-                return print_json(&result);
-            }
-            let snapshot = expect_state(result)?;
-            print_state(&snapshot);
+        CliCommand::Daemon(args) => daemon_command(args, &paths, json).await,
+        CliCommand::Control(args) => control_command(args, &paths, json).await,
+        CliCommand::Queue(args) => queue_command(args, &paths, json).await,
+        CliCommand::Library(args) => library_command(args, &paths, json).await,
+        CliCommand::Search(args) => search_command(args, &paths, json).await,
+        CliCommand::Auth(args) => auth_command(args, &paths, json).await,
+        CliCommand::Cache(args) => cache_command(args, &paths, &config).await,
+        CliCommand::Doctor => doctor(&paths, &config).await,
+        CliCommand::Logs => {
+            println!("Daemon log: tail -f {}", paths.log_file().display());
+            println!("TUI log: tail -f {}", paths.tui_log_file().display());
             Ok(())
         }
-        CliCommand::Queue => {
-            let result = send(&paths, Command::GetState).await?;
-            if json {
-                return print_json(&result);
+        CliCommand::Uninstall { yes, remove_binary } => {
+            uninstall(&paths, &config, yes, remove_binary).await
+        }
+        CliCommand::Tui | CliCommand::InternalDaemon => unreachable!("handled in main"),
+    }
+}
+
+async fn daemon_command(args: DaemonArgs, paths: &Paths, json: bool) -> Result<()> {
+    if args.action.is_none() {
+        print_help(HelpTopic::Daemon);
+        return Ok(());
+    }
+    match args.action.expect("checked above") {
+        DaemonAction::Start => match IpcClient::connect(paths.socket_file()).await {
+            Ok(client) => {
+                client.close().await;
+                println!("Daemon is already running.");
+                Ok(())
             }
-            let snapshot = expect_state(result)?;
-            print_queue(&snapshot);
-            Ok(())
-        }
-        CliCommand::Play => ack(&paths, Command::Play, json).await,
-        CliCommand::Pause => ack(&paths, Command::Pause, json).await,
-        CliCommand::PlayPause => ack(&paths, Command::PlayPause, json).await,
-        CliCommand::Stop => ack(&paths, Command::Stop, json).await,
-        CliCommand::Next => ack(&paths, Command::Next, json).await,
-        CliCommand::Previous => ack(&paths, Command::Previous, json).await,
-        CliCommand::QueueClear => ack(&paths, Command::QueueClear, json).await,
-        CliCommand::QueueRemove { index } => {
-            ack(&paths, Command::QueueRemove { index }, json).await
-        }
-        CliCommand::QueuePlay { index } => ack(&paths, Command::QueuePlay { index }, json).await,
-        CliCommand::Mode { mode } => match mode {
+            Err(_) => {
+                let client = ensure_daemon(paths).await?;
+                client.close().await;
+                println!("Daemon started in the background.");
+                Ok(())
+            }
+        },
+        DaemonAction::Stop => shutdown_daemon(paths, json).await,
+        DaemonAction::Status => status_command(paths, json).await,
+    }
+}
+
+async fn status_command(paths: &Paths, json: bool) -> Result<()> {
+    let result = send(paths, Command::GetState).await?;
+    if json {
+        return print_json(&result);
+    }
+    let snapshot = expect_state(result)?;
+    print_state(&snapshot);
+    Ok(())
+}
+
+async fn control_command(args: ControlArgs, paths: &Paths, json: bool) -> Result<()> {
+    if args.action.is_none() {
+        print_help(HelpTopic::Control);
+        return Ok(());
+    }
+    match args.action.expect("checked above") {
+        ControlAction::Resume => ack(paths, Command::Play, json).await,
+        ControlAction::Pause => ack(paths, Command::Pause, json).await,
+        ControlAction::Stop => ack(paths, Command::Stop, json).await,
+        ControlAction::Next => ack(paths, Command::Next, json).await,
+        ControlAction::Previous => ack(paths, Command::Previous, json).await,
+        ControlAction::Mode { mode } => match mode {
             Some(mode) => {
                 let mode = parse_mode(&mode)?;
-                ack(&paths, Command::SetMode { mode }, json).await
+                ack(paths, Command::SetMode { mode }, json).await
             }
-            None => ack(&paths, Command::CycleMode, json).await,
+            None => ack(paths, Command::CycleMode, json).await,
         },
-        CliCommand::Volume { value } => match value {
+        ControlAction::Volume { value } => match value {
             Some(value) => {
                 if !(0.0..=100.0).contains(&value) {
                     bail!("volume must be between 0 and 100");
                 }
                 ack(
-                    &paths,
+                    paths,
                     Command::SetVolume {
                         volume: value / 100.0,
                     },
@@ -243,19 +392,19 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
                 .await
             }
             None => {
-                let result = send(&paths, Command::GetState).await?;
+                let result = send(paths, Command::GetState).await?;
                 let snapshot = expect_state(result)?;
                 println!("Volume: {:.0}%", snapshot.playback.volume * 100.0);
                 Ok(())
             }
         },
-        CliCommand::Seek { offset } => {
+        ControlAction::Seek { offset } => {
             let seconds: f64 = offset
                 .trim_start_matches('+')
                 .parse()
                 .with_context(|| format!("invalid seek offset `{offset}`"))?;
             ack(
-                &paths,
+                paths,
                 Command::SeekRelative {
                     offset_ms: (seconds * 1000.0) as i64,
                 },
@@ -263,36 +412,55 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
             )
             .await
         }
-        CliCommand::Search(args) => {
-            let kind = parse_search_kind(&args.kind)?;
-            let result = send(
-                &paths,
-                Command::Search {
-                    query: args.query,
-                    kind,
-                    offset: args.offset,
-                    limit: args.limit,
-                },
-            )
-            .await?;
+    }
+}
+
+async fn queue_command(args: QueueArgs, paths: &Paths, json: bool) -> Result<()> {
+    if args.action.is_none() {
+        print_help(HelpTopic::Queue);
+        return Ok(());
+    }
+    match args.action.expect("checked above") {
+        QueueAction::List => {
+            let result = send(paths, Command::GetState).await?;
             if json {
                 return print_json(&result);
             }
-            match result {
-                CommandResult::Search(page) => {
-                    print_search(&page);
-                    Ok(())
-                }
-                other => print_result(other),
-            }
+            let snapshot = expect_state(result)?;
+            print_queue(&snapshot);
+            Ok(())
         }
-        CliCommand::Playlists { kind } => {
+        QueueAction::Play { index } => ack(paths, Command::QueuePlay { index }, json).await,
+        QueueAction::Remove { index } => ack(paths, Command::QueueRemove { index }, json).await,
+        QueueAction::Clear => ack(paths, Command::QueueClear, json).await,
+        QueueAction::StartPlaylist { id, start } => {
+            ack(
+                paths,
+                Command::StartPlaylist {
+                    id,
+                    start_index: start,
+                },
+                json,
+            )
+            .await
+        }
+        QueueAction::AddPlaylist { id } => ack(paths, Command::AddPlaylist { id }, json).await,
+    }
+}
+
+async fn library_command(args: LibraryArgs, paths: &Paths, json: bool) -> Result<()> {
+    if args.action.is_none() {
+        print_help(HelpTopic::Library);
+        return Ok(());
+    }
+    match args.action.expect("checked above") {
+        LibraryAction::Playlists { kind } => {
             let kind = match kind.to_ascii_lowercase().as_str() {
                 "created" | "mine" => PlaylistKind::Created,
                 "subscribed" | "collected" => PlaylistKind::Subscribed,
                 other => bail!("unknown playlist kind `{other}`; use created or subscribed"),
             };
-            let result = send(&paths, Command::Playlists { kind }).await?;
+            let result = send(paths, Command::Playlists { kind }).await?;
             if json {
                 return print_json(&result);
             }
@@ -316,13 +484,13 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
                 other => print_result(other),
             }
         }
-        CliCommand::Liked => songs_command(&paths, Command::LikedSongs, json).await,
-        CliCommand::Recent => songs_command(&paths, Command::RecentSongs, json).await,
-        CliCommand::Daily { refresh } => {
-            songs_command(&paths, Command::DailySongs { refresh }, json).await
+        LibraryAction::Liked => songs_command(paths, Command::LikedSongs, json).await,
+        LibraryAction::Recent => songs_command(paths, Command::RecentSongs, json).await,
+        LibraryAction::Daily { refresh } => {
+            songs_command(paths, Command::DailySongs { refresh }, json).await
         }
-        CliCommand::DailyPlaylists { refresh } => {
-            let result = send(&paths, Command::DailyPlaylists { refresh }).await?;
+        LibraryAction::DailyPlaylists { refresh } => {
+            let result = send(paths, Command::DailyPlaylists { refresh }).await?;
             if json {
                 return print_json(&result);
             }
@@ -342,8 +510,8 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
                 other => print_result(other),
             }
         }
-        CliCommand::Radar { refresh } => {
-            let result = send(&paths, Command::Radar { refresh }).await?;
+        LibraryAction::Radar { refresh } => {
+            let result = send(paths, Command::Radar { refresh }).await?;
             if json {
                 return print_json(&result);
             }
@@ -355,9 +523,9 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
                 other => print_result(other),
             }
         }
-        CliCommand::Fm => ack(&paths, Command::PersonalFm, json).await,
-        CliCommand::Playlist { id, offset, limit } => {
-            let result = send(&paths, Command::PlaylistTracks { id, offset, limit }).await?;
+        LibraryAction::Fm => ack(paths, Command::PersonalFm, json).await,
+        LibraryAction::Playlist { id, offset, limit } => {
+            let result = send(paths, Command::PlaylistTracks { id, offset, limit }).await?;
             if json {
                 return print_json(&result);
             }
@@ -369,38 +537,199 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
                 other => print_result(other),
             }
         }
-        CliCommand::StartPlaylist { id, start } => {
-            ack(
-                &paths,
-                Command::StartPlaylist {
-                    id,
-                    start_index: start,
-                },
-                json,
-            )
-            .await
+    }
+}
+
+async fn search_command(args: SearchArgs, paths: &Paths, json: bool) -> Result<()> {
+    let kind = parse_search_kind(&args.kind)?;
+    let result = send(
+        paths,
+        Command::Search {
+            query: args.query,
+            kind,
+            offset: args.offset,
+            limit: args.limit,
+        },
+    )
+    .await?;
+    if json {
+        return print_json(&result);
+    }
+    match result {
+        CommandResult::Search(page) => {
+            print_search(&page);
+            Ok(())
         }
-        CliCommand::AddPlaylist { id } => ack(&paths, Command::AddPlaylist { id }, json).await,
-        CliCommand::Login(args) => login(&paths, args).await,
-        CliCommand::Logout => {
-            let result = send(&paths, Command::Logout).await?;
+        other => print_result(other),
+    }
+}
+
+async fn auth_command(args: AuthArgs, paths: &Paths, json: bool) -> Result<()> {
+    if args.action.is_none() {
+        print_help(HelpTopic::Auth);
+        return Ok(());
+    }
+    match args.action.expect("checked above") {
+        AuthAction::Login(args) => login(paths, args).await,
+        AuthAction::Logout => {
+            let result = send(paths, Command::Logout).await?;
             if json {
                 return print_json(&result);
             }
             println!("Logged out.");
             Ok(())
         }
-        CliCommand::Cache { command } => cache_command(command, &paths, &config).await,
-        CliCommand::Doctor => doctor(&paths, &config).await,
-        CliCommand::Logs => {
-            println!("Daemon log: tail -f {}", paths.log_file().display());
-            println!("TUI log: tail -f {}", paths.tui_log_file().display());
-            Ok(())
-        }
-        CliCommand::Uninstall { yes, remove_binary } => {
-            uninstall(&paths, &config, yes, remove_binary).await
-        }
-        CliCommand::Daemon | CliCommand::Tui => unreachable!("handled in main"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HelpTopic {
+    Root,
+    Daemon,
+    Control,
+    Queue,
+    Library,
+    Auth,
+    Cache,
+}
+
+fn help_item(name: &str, description: &str) -> String {
+    format!("{name:<24} {description}")
+}
+
+fn help_daemon(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("daemon", "Manage the background daemon")
+    } else {
+        "yoruplay daemon".to_string()
+    };
+    Tree::new(label).with_leaves([
+        help_item("start", "Start a detached daemon and wait for its socket"),
+        help_item("stop", "Gracefully stop the daemon and reap mpv"),
+        help_item("status", "Show daemon, login and playback status"),
+    ])
+}
+
+fn help_control(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("control", "Playback controls")
+    } else {
+        "yoruplay control".to_string()
+    };
+    Tree::new(label).with_leaves([
+        help_item("resume", "Start or resume playback"),
+        help_item("pause", "Pause playback"),
+        help_item("stop", "Stop playback and reset the position"),
+        help_item("next", "Play the next track"),
+        help_item("previous", "Play the previous track"),
+        help_item("mode [mode]", "Show or set the playback mode"),
+        help_item("volume [value]", "Show or set the volume (0-100)"),
+        help_item("seek <offset>", "Seek relative to the current position"),
+    ])
+}
+
+fn help_queue(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("queue", "Queue management")
+    } else {
+        "yoruplay queue".to_string()
+    };
+    Tree::new(label).with_leaves([
+        help_item("list", "Print the queue"),
+        help_item("play <index>", "Play a queue entry"),
+        help_item("remove <index>", "Remove a queue entry"),
+        help_item("clear", "Clear the queue"),
+        help_item(
+            "start-playlist <id>",
+            "Replace the queue with a playlist and play",
+        ),
+        help_item("add-playlist <id>", "Append a playlist to the queue"),
+    ])
+}
+
+fn help_library(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("library", "Browse the NetEase library")
+    } else {
+        "yoruplay library".to_string()
+    };
+    Tree::new(label).with_leaves([
+        help_item("playlists", "List created or subscribed playlists"),
+        help_item("liked", "List liked songs"),
+        help_item("recent", "List server recently played songs"),
+        help_item("daily", "List today's recommended songs"),
+        help_item("daily-playlists", "List today's recommended playlists"),
+        help_item("radar", "Resolve and print Private Radar"),
+        help_item("fm", "Start Personal FM"),
+        help_item("playlist <id>", "Print one playlist and its songs"),
+    ])
+}
+
+fn help_auth(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("auth", "Account login and logout")
+    } else {
+        "yoruplay auth".to_string()
+    };
+    Tree::new(label).with_leaves([
+        help_item("login", "Log in through Firefox or stdin Cookie"),
+        help_item("logout", "Remove the saved NetEase session"),
+    ])
+}
+
+fn help_cache(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("cache", "Metadata cache")
+    } else {
+        "yoruplay cache".to_string()
+    };
+    Tree::new(label).with_leaves([
+        help_item("clear", "Remove all cache entries"),
+        help_item("info", "Show cache size and configuration"),
+    ])
+}
+
+fn help_root() -> Tree<String> {
+    let mut root = Tree::new("yoruplay".to_string());
+    root.push(help_item(
+        "tui",
+        "Open the terminal interface (auto-starts daemon)",
+    ));
+    root.push(help_daemon(true));
+    root.push(help_control(true));
+    root.push(help_queue(true));
+    root.push(help_library(true));
+    root.push(help_item(
+        "search <query>",
+        "Search songs, artists, albums or playlists",
+    ));
+    root.push(help_auth(true));
+    root.push(help_cache(true));
+    root.push(help_item(
+        "doctor",
+        "Check mpv, PipeWire, daemon, MPRIS, permissions",
+    ));
+    root.push(help_item("logs", "Print log paths and tail commands"));
+    root.push(help_item("uninstall", "Remove cache and runtime state"));
+    root.push(help_item("help [command]", "Print this command tree"));
+    root
+}
+
+fn print_help(topic: HelpTopic) {
+    let tree = match topic {
+        HelpTopic::Root => help_root(),
+        HelpTopic::Daemon => help_daemon(false),
+        HelpTopic::Control => help_control(false),
+        HelpTopic::Queue => help_queue(false),
+        HelpTopic::Library => help_library(false),
+        HelpTopic::Auth => help_auth(false),
+        HelpTopic::Cache => help_cache(false),
+    };
+    print!("{tree}");
+    println!();
+    println!("Global option: --json   print machine-readable JSON");
+    if matches!(topic, HelpTopic::Root) {
+        println!("Run `yoruplay <command> --help` for leaf options.");
     }
 }
 
@@ -511,7 +840,7 @@ async fn ensure_daemon(paths: &Paths) -> Result<IpcClient> {
         .with_context(|| format!("open {}", log_path.display()))?;
     let mut command = ProcessCommand::new(&exe);
     command
-        .arg("daemon")
+        .arg("__daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
@@ -669,10 +998,14 @@ fn print_auth_result(result: CommandResult) -> Result<()> {
     }
 }
 
-async fn cache_command(command: CacheCommand, paths: &Paths, config: &Config) -> Result<()> {
+async fn cache_command(args: CacheArgs, paths: &Paths, config: &Config) -> Result<()> {
+    if args.action.is_none() {
+        print_help(HelpTopic::Cache);
+        return Ok(());
+    }
     let cache = FileCache::new(paths.cache_dir.clone(), config.cache.max_mb);
-    match command {
-        CacheCommand::Clear => {
+    match args.action.expect("checked above") {
+        CacheAction::Clear => {
             if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
                 let result = client
                     .request(Command::ClearCache)
@@ -686,7 +1019,7 @@ async fn cache_command(command: CacheCommand, paths: &Paths, config: &Config) ->
             println!("Cache cleared ({before} bytes).");
             Ok(())
         }
-        CacheCommand::Info => {
+        CacheAction::Info => {
             println!("Cache directory: {}", cache.dir().display());
             println!("Size: {} bytes", cache.size_bytes());
             println!("Limit: {} bytes", cache.max_bytes());

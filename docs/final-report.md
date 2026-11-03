@@ -136,13 +136,16 @@ eapi（上游该模块使用 xeapi），实际请求已验证可用；私人雷�
 
 ## 5. 登录重构与真实账号验收
 
+歌曲缓存采用原生格式、`~/Music/YoruPlay`、`lofty` 标签，但按计划**尚未实现**；
+设计见 `docs/song-cache.md`。
+
 二维码登录已移除。原因是网易在扫码阶段可能根据设备指纹/IP 拒绝二维码，
 服务端不会下发 802，客户端无法从 802/803 状态入手修复；继续重试只会增加风控。
 
 当前登录方式：
 
 ```sh
-yoruplay login
+yoruplay auth login
 ```
 
 打开 `https://music.163.com/login`，等待用户在火狐浏览器完成官方登录，然后
@@ -156,10 +159,10 @@ yoruplay login
 - 删除临时数据库
 
 其他浏览器（Chrome/Chromium/Brave/Edge）使用 keyring 加密 Cookie，暂不自动
-读取；可用 `yoruplay login --cookie-stdin` 手动导入。TUI 登录面板支持 `b`
+读取；可用 `yoruplay auth login --cookie-stdin` 手动导入。TUI 登录面板支持 `b`
 打开官方页面、`i` 导入 Firefox Cookie。
 
-`yoruplay shutdown`（别名 `quit`）保持可用：通过 IPC 优雅关闭 daemon、保存
+`yoruplay daemon stop` 保持可用：通过 IPC 优雅关闭 daemon、保存
 队列并回收 mpv；兼容旧协议 daemon 的 shutdown 握手。
 
 ## 5.1 真实账号验证结果
@@ -230,12 +233,17 @@ cedd914 fix: harden MPRIS signals, persistence and TUI edge cases
 ## 8. 使用
 
 ```sh
-yoruplay login          # 打开官方登录页并导入 Firefox Cookie
+yoruplay auth login     # 导入 Firefox Cookie（必要时打开官方登录页）
 yoruplay                # TUI
-yoruplay status
-yoruplay fm / daily / radar / liked / recent / search ...
-yoruplay daemon         # 可选：前台运行
-yoruplay shutdown       # 关闭当前 daemon
+yoruplay daemon status
+yoruplay library fm
+yoruplay library daily
+yoruplay library radar
+yoruplay library liked
+yoruplay library recent
+yoruplay search ...
+yoruplay daemon start   # 后台启动 daemon
+yoruplay daemon stop    # 关闭当前 daemon
 ```
 
 详见 `README.md`、`docs/architecture.md`、`docs/upstream-api-map.md`、

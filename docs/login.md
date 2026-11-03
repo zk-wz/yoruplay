@@ -8,7 +8,7 @@ browser's existing session.
 ## Default: Firefox
 
 ```sh
-yoruplay login
+yoruplay auth login
 ```
 
 The command uses the system `sqlite3` binary to read the copied Firefox
@@ -27,7 +27,7 @@ It:
 To switch accounts even when the current Firefox session is valid:
 
 ```sh
-yoruplay login --switch-account   # alias: --force
+yoruplay auth login --switch-account   # alias: --force
 ```
 
 This always opens the browser and waits until Firefox holds a different
@@ -66,7 +66,7 @@ not read them automatically yet. Log in on the official web page and pipe the
 Cookie header through stdin:
 
 ```sh
-yoruplay login --cookie-stdin
+yoruplay auth login --cookie-stdin
 # paste MUSIC_U=...; __csrf=... and press Ctrl-D
 ```
 
@@ -74,7 +74,7 @@ Or from a protected file:
 
 ```sh
 chmod 600 ~/netease-cookie.txt
-yoruplay login --cookie-stdin < ~/netease-cookie.txt
+yoruplay auth login --cookie-stdin < ~/netease-cookie.txt
 ```
 
 Requirements:
@@ -96,13 +96,13 @@ rolls back and leaves the current session untouched.
 ```
 
 `auth.json` contains the session cookies and the cached account profile. Do not
-share it. `yoruplay logout` removes it; `yoruplay shutdown` stops the daemon
+share it. `yoruplay auth logout` removes it; `yoruplay daemon stop` stops the daemon
 without touching credentials.
 
 ## Verifying an imported session
 
 ```sh
-yoruplay status
+yoruplay daemon status
 cargo test -p yoruplay-api --test live_account -- --ignored --nocapture
 ```
 

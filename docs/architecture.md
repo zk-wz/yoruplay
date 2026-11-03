@@ -88,7 +88,7 @@ events rather than blocking playback.
 Commands cover state, browser Cookie login, library browsing, search, playback, seek, volume,
 mode, queue mutations, cache clear and shutdown. Playback commands return only
 after the daemon has accepted the state update; network loads are serialised and
-superseded loads are discarded. `yoruplay shutdown` sends `Shutdown` through the
+superseded loads are discarded. `yoruplay daemon stop` sends `Shutdown` through the
 normal client, with a raw version-tolerant handshake for an older daemon during
 an upgrade, then waits for the socket to disappear.
 
@@ -129,5 +129,5 @@ Heartbeat mode remains in daemon state. SetPosition validates the track ID.
 API failures, mpv failures, MPRIS registration failures and client
 disconnects are independent. A failed MPRIS registration adds a startup warning;
 a failed lyric fetch is silent; an unplayable track reports a specific error and
-does not crash the service. The daemon never exits because a single external
+does not crash the daemon. The daemon never exits because a single external
 request failed.

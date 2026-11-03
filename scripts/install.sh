@@ -21,5 +21,5 @@ cat <<MSG
 
 Installed "$HOME/.local/bin/yoruplay"
 No systemd unit or autostart entry was created.
-The TUI auto-starts the daemon; use `yoruplay daemon` for a foreground daemon.
+The TUI auto-starts the daemon; use `yoruplay daemon start` to start it explicitly.
 MSG

@@ -18,6 +18,7 @@ anyhow.workspace = true
 clap.workspace = true
 libc = "0.2"
 serde_json.workspace = true
+termtree.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

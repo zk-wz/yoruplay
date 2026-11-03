@@ -33,7 +33,7 @@ impl DaemonProcess {
         std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
         let exe = env!("CARGO_BIN_EXE_yoruplay");
         let child = ProcessCommand::new(exe)
-            .arg("daemon")
+            .arg("__daemon")
             .env("HOME", root)
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))
@@ -152,7 +152,7 @@ async fn two_clients_share_state_and_events() {
     assert_eq!(snapshot.playback.volume, 0.33);
 
     let second = ProcessCommand::new(env!("CARGO_BIN_EXE_yoruplay"))
-        .arg("daemon")
+        .arg("__daemon")
         .env("HOME", daemon.dir.path())
         .env("XDG_CONFIG_HOME", daemon.dir.path().join("config"))
         .env("XDG_DATA_HOME", daemon.dir.path().join("data"))
@@ -191,7 +191,7 @@ async fn empty_queue_commands_are_clear_errors() {
 async fn spawn_daemon_for(root: &Path, paths: &yoruplay_protocol::Paths) -> Child {
     let exe = env!("CARGO_BIN_EXE_yoruplay");
     let child = ProcessCommand::new(exe)
-        .arg("daemon")
+        .arg("__daemon")
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
@@ -232,7 +232,7 @@ async fn cli_shutdown_stops_the_daemon() {
     let mut child = spawn_daemon_for(root, &paths).await;
 
     let output = ProcessCommand::new(env!("CARGO_BIN_EXE_yoruplay"))
-        .arg("shutdown")
+        .args(["daemon", "stop"])
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
@@ -244,7 +244,7 @@ async fn cli_shutdown_stops_the_daemon() {
         )
         .output()
         .await
-        .expect("run yoruplay shutdown");
+        .expect("run yoruplay daemon stop");
     assert!(
         output.status.success(),
         "shutdown failed: {}",
