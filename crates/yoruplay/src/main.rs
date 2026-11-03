@@ -13,7 +13,7 @@ use yoruplay_core::mpv::MpvController;
 use yoruplay_ipc::{shutdown_any_version, IpcClient};
 use yoruplay_protocol::{
     Command, CommandResult, Config, ErrorInfo, Paths, PlayMode, PlaylistKind, PlaylistTracks,
-    QrLoginStatus, SearchItems, SearchKind, SearchPage, Song, SongsView, StateSnapshot,
+    SearchItems, SearchKind, SearchPage, Song, SongsView, StateSnapshot, LOGIN_URL,
 };
 
 #[derive(Parser, Debug)]
@@ -111,7 +111,7 @@ enum CliCommand {
     },
     /// Append all songs of a playlist to the queue.
     AddPlaylist { id: u64 },
-    /// Log in with a QR code or an imported cookie.
+    /// Log in through Firefox, or import a Cookie header from stdin.
     Login(LoginArgs),
     /// Log out and remove the saved NetEase session.
     Logout,
@@ -154,9 +154,6 @@ struct LoginArgs {
     /// Read a Cookie header from stdin (MUSIC_U required). Avoids shell history.
     #[arg(long)]
     cookie_stdin: bool,
-    /// Also write the login QR as a self-contained SVG (useful over SSH).
-    #[arg(long)]
-    qr_svg: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -604,73 +601,38 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
         client.close().await;
         print_auth_result(result)
     } else {
-        let result = client
-            .request(Command::LoginQrStart)
-            .await
-            .map_err(ipc_error)?;
-        let qr = match result {
-            CommandResult::Qr(qr) => qr,
-            _ => bail!("unexpected daemon response while starting QR login"),
-        };
-        println!("Scan this QR code with the NetEase Cloud Music mobile app:\n");
-        for line in yoruplay_tui::qr::render_ansi(&qr.url)
-            .map_err(|e| anyhow!("could not render QR code: {e}"))?
-        {
-            println!("{line}");
-        }
-        println!("\n{}\n", qr.url);
-        if let Some(path) = &args.qr_svg {
-            let svg = yoruplay_tui::qr::render_svg(&qr.url)
-                .map_err(|e| anyhow!("could not render QR SVG: {e}"))?;
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, svg).with_context(|| format!("write {}", path.display()))?;
-            println!("QR SVG written to {}\n", path.display());
-        }
-        let mut last_status = None;
-        for _ in 0..300 {
-            let result = client
-                .request(Command::LoginQrPoll {
-                    key: qr.key.clone(),
-                    chain_id: qr.chain_id.clone(),
-                })
-                .await
-                .map_err(ipc_error)?;
-            let (status, message) = match result {
-                CommandResult::QrStatus { status, message } => (status, message),
-                _ => bail!("unexpected daemon response while polling QR login"),
-            };
-            if last_status != Some(status) {
-                println!("{message}");
-                last_status = Some(status);
-            }
-            match status {
-                QrLoginStatus::Success => {
-                    let state = client.request(Command::GetState).await.map_err(ipc_error)?;
+        println!("Opening {LOGIN_URL} in your browser.");
+        open_login_page();
+        println!(
+            "Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...\n             Other browsers are not supported yet; use --cookie-stdin for those."
+        );
+        for _ in 0..150 {
+            match client.request(Command::ImportBrowserCookie).await {
+                Ok(result) => {
                     client.close().await;
-                    if let CommandResult::State(snapshot) = state {
-                        match snapshot.auth.profile {
-                            Some(profile) => {
-                                println!("Logged in as {} ({})", profile.nickname, profile.user_id)
-                            }
-                            None => println!("Logged in."),
-                        }
-                    }
-                    return Ok(());
+                    return print_auth_result(result);
                 }
-                QrLoginStatus::Expired | QrLoginStatus::Cancelled => {
-                    client.close().await;
-                    bail!("QR login expired; run `yoruplay login` again");
-                }
-                QrLoginStatus::Waiting | QrLoginStatus::Scanned => {
+                Err(error) if error.code == "browser_cookie_missing" => {
                     tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(error) => {
+                    client.close().await;
+                    return Err(ipc_error(error));
                 }
             }
         }
         client.close().await;
-        bail!("QR login timed out")
+        bail!("timed out waiting for Firefox login; run `yoruplay login` again")
     }
+}
+
+fn open_login_page() {
+    let _ = ProcessCommand::new("xdg-open")
+        .arg(LOGIN_URL)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 fn print_auth_result(result: CommandResult) -> Result<()> {
@@ -998,12 +960,6 @@ fn print_result(result: CommandResult) -> Result<()> {
         }
         CommandResult::PlaylistTracks(tracks) => print_tracks(&tracks),
         CommandResult::Search(page) => print_search(&page),
-        CommandResult::Qr(qr) => {
-            println!("QR login URL: {}", qr.url);
-        }
-        CommandResult::QrStatus { status, message } => {
-            println!("{status:?}: {message}");
-        }
     }
     Ok(())
 }

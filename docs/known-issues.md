@@ -1,26 +1,20 @@
 # Known issues and limitations
 
-- **QR risk control (NetEase code 8821 / "设备环境异常")**: YoruPlay now uses
-  the current official web flow (`/st/platform/scanlogin`, weapi `type=1`,
-  web `chainId`, web login headers). The previous `/login?codekey` URL and
-  Android `deviceId` chain were obsolete and caused the phone to reject the
-  scan before the API saw 802/803. NetEase can still reject a login based on IP
-  or device environment; Clash TUN/proxy exit IPs are a common cause. This is
-  not an account ban. If a scan still fails, use direct routing for NetEase
-  domains or import a `MUSIC_U` cookie from the official web login. See
-  `docs/login-protocol.md`.
-- **Web QR fingerprint token**: the official page sends `ydDeviceToken` from
-  NetEase's JavaScript fingerprint SDK. YoruPlay has no JS runtime and sends an
-  empty value (the same fallback used by other native clients when unavailable).
-  If NetEase makes a non-empty token mandatory, QR login will need a WebView or
-  browser helper; cookie import remains available.
+- **Firefox-only automatic login**: YoruPlay reads the plaintext
+  `cookies.sqlite` used by Firefox (Arch, upstream, Snap and Flatpak profiles).
+  Chrome, Chromium, Brave and Edge encrypt cookies through a keyring, so they
+  are not read automatically. Use `yoruplay login --cookie-stdin` for those
+  browsers. See `docs/login.md`.
+- **Firefox database lock**: Firefox keeps `cookies.sqlite` open while running.
+  YoruPlay copies the database plus its WAL/SHM sidecars to a private temporary
+  directory, queries only `MUSIC_U`/`__csrf` and related NetEase cookies, then
+  deletes the copy. Cookies are never logged.
 - **Real-account verification status**: an existing Firefox `MUSIC_U` session
   was imported with `yoruplay login --cookie-stdin`; the account profile,
   created/subscribed playlists, liked songs, daily songs/playlists, Personal FM,
   recent history, search, stream URL and lyrics were verified read-only with
-  `crates/api/tests/live_account.rs`. The QR success callback itself is still
-  unverified. Heartbeat returned `不支持该歌单类型` for the tested created
-  playlist, so its real-account path remains unverified.
+  `crates/api/tests/live_account.rs`. Heartbeat returned `不支持该歌单类型` for
+  the tested created playlist, so its real-account path remains unverified.
 - **Private Radar variability**: the radar playlist appears in some
   `/api/v1/discovery/recommend/resource` responses but not every call. The
   daemon caches the daily playlist list; the direct API test can see a later
@@ -57,8 +51,6 @@
   stream is refreshed on resume/error; the next user action retries API calls.
 - **Trial streams**: when the account can only play a preview, the daemon
   reports a trial warning but cannot extend it.
-- **QR terminal size**: a QR needs roughly 40+ columns and 25+ rows. Use
-  `yoruplay login --qr-svg <path>` in tiny terminals or over SSH.
 - **No local audio cache**: YoruPlay does not persist audio files; stream URL
   expiry is handled by refresh.
 - **Private/cloud upload edge cases**: account-specific restricted tracks may

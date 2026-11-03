@@ -17,7 +17,8 @@ the same daemon and queue.
 ## Features
 
 - Native Rust NetEase Web API client (eapi + weapi, no Node.js at runtime).
-- QR-code login, session reuse, cookie import, logout, expiry detection.
+- Browser-assisted Firefox login, Cookie import, session reuse, logout and
+  expiry detection.
 - Liked songs, created/subscribed playlists, full playlist tracks, server
   recently-played history, daily songs/playlists, Personal FM and Private Radar
   discovery.
@@ -110,42 +111,39 @@ TUI with `q` does not stop the daemon.
 yoruplay login
 ```
 
-A Unicode QR is printed in the terminal. It uses NetEase's current web login
-endpoint (`/st/platform/scanlogin`) with a web `chainId`, web request headers
-and `type=1`, matching the official `https://music.163.com/login` page. Scan it
-with the NetEase Cloud Music app and confirm. The wire-level details and the
-history of the old failed flow are in
-[`docs/login-protocol.md`](docs/login-protocol.md). For SSH or terminals too
-small for a QR, write an SVG:
+This opens `https://music.163.com/login` in the default browser and waits for a
+`MUSIC_U` cookie in Firefox. It then imports the session, validates it with the
+NetEase account endpoint, and writes `auth.json` with mode `0600`.
+
+Firefox is the only browser read automatically. Its profiles are discovered in
+the Arch (`~/.config/mozilla/firefox`), upstream, Snap and Flatpak locations.
+Chrome/Chromium/Brave/Edge encrypt their cookie databases with a keyring, so use
+the manual path for those.
+
+In the TUI, press `L` to open the login panel, then `b` to open the official
+page and `i` to import the Firefox cookie.
+
+Manual Cookie import (any browser):
 
 ```sh
-yoruplay login --qr-svg ~/yoruplay-login.svg
+yoruplay login --cookie-stdin
+# paste MUSIC_U=...; __csrf=... and press Ctrl-D
 ```
 
-Import an existing cookie as a fallback. The cookie must contain `MUSIC_U`:
+Or from a protected file:
 
 ```sh
-printf '%s\n' "$NETEASE_COOKIE" | yoruplay login --cookie-stdin
+chmod 600 ~/netease-cookie.txt
+yoruplay login --cookie-stdin < ~/netease-cookie.txt
 ```
 
-Avoid passing cookies as command-line arguments; YoruPlay only accepts stdin
-for this reason. Credentials are stored in
-`$XDG_DATA_HOME/yoruplay/auth.json` with mode `0600`; the runtime directory is
-`0700` and the IPC/mpv sockets are `0600`. Before the first login this file may
-contain only a stable device identity (no cookie), so repeated QR attempts do
-not look like a new device every time.
+The header must contain `MUSIC_U=...`; `__csrf=...` is recommended. Do not put
+cookies in shell history or chat. YoruPlay only accepts stdin for this reason.
+Credentials are stored in `$XDG_DATA_HOME/yoruplay/auth.json` with mode `0600`;
+the runtime directory is `0700` and the IPC/mpv sockets are `0600`.
 
-If NetEase still says the device environment is abnormal / returns risk code
-8821, the current web protocol is already in use; the remaining causes are
-network/risk-control related rather than the old `/login?codekey` URL. Try:
-
-1. Route `music.163.com`, `interfacepc.music.163.com` and `*.126.net` directly
-   in Clash, or temporarily disable TUN/proxy.
-2. Wait a few minutes; repeated QR generation can be flagged.
-3. Log in on the official `https://music.163.com` page in a browser, then import
-   the `MUSIC_U` cookie:
-   `printf '%s\n' "MUSIC_U=..." | yoruplay login --cookie-stdin`
-4. Check `journalctl --user -u yoruplay` for the exact QR poll code/message.
+Full details, the Firefox profile list and the manual extraction procedure are
+in [`docs/login.md`](docs/login.md).
 
 Logout removes the saved session:
 
@@ -180,6 +178,7 @@ Common keys:
 | `a` / `A` | Add selected / add all to queue |
 | `r` | Refresh current view |
 | `L` | Login/account panel |
+| `b` / `i` | Open login page / import Firefox cookie (inside login panel) |
 | `?` | Help |
 | `q` | Close TUI only |
 

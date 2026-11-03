@@ -6,12 +6,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
-use yoruplay_protocol::{NoticeLevel, PlaybackStatus, PlaylistSummary, SearchItems, SearchKind};
+use yoruplay_protocol::{
+    NoticeLevel, PlaybackStatus, PlaylistSummary, SearchItems, SearchKind, LOGIN_URL,
+};
 
 use crate::app::{
     mode_label, search_kind_label, tr, App, Detail, Focus, PlaylistsOrigin, SongsOrigin,
 };
-use crate::qr;
 
 pub fn draw(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
@@ -302,8 +303,8 @@ fn landing_lines(app: &App) -> Vec<Line<'static>> {
         lines.push(Line::styled(
             tr(
                 app.lang,
-                "Press L to log in with a QR code (needed for your library and playback).",
-                "按 L 使用二维码登录（访问音乐库和播放需要登录）。",
+                "Press L to log in through Firefox (needed for your library and playback).",
+                "按 L 使用火狐浏览器登录（访问音乐库和播放需要登录）。",
             ),
             Style::default().fg(Color::Yellow),
         ));
@@ -584,8 +585,8 @@ fn account_lines(app: &App) -> Vec<Line<'static>> {
     lines.push(Line::raw(""));
     lines.push(Line::raw(tr(
         app.lang,
-        "l  request a new QR login",
-        "l  获取新的登录二维码",
+        "b  open the login page · i  import Firefox cookie",
+        "b  打开登录页 · i  导入火狐 Cookie",
     )));
     lines.push(Line::raw(tr(app.lang, "o  log out", "o  退出登录")));
     lines.push(Line::raw(tr(
@@ -824,85 +825,34 @@ fn render_login(app: &App, frame: &mut Frame, area: Rect, login: &crate::app::Lo
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let mut lines: Vec<Line> = Vec::new();
-    if let Some(qr) = &login.qr {
-        match qr_lines(&qr.url, inner.width as usize, inner.height as usize) {
-            Some(qr_content) => lines.extend(qr_content),
-            None => {
-                lines.push(Line::styled(
-                    tr(
-                        app.lang,
-                        "Terminal too small for the QR code. Run `yoruplay login`.",
-                        "终端空间不足以显示二维码，请运行 `yoruplay login`。",
-                    ),
-                    Style::default().fg(Color::Yellow),
-                ));
-                lines.push(Line::raw(""));
-                for part in wrap_text(&qr.url, inner.width as usize) {
-                    lines.push(Line::raw(part));
-                }
-            }
-        }
+    lines.push(Line::styled(
+        tr(
+            app.lang,
+            "Open the official login page:",
+            "请打开官方登录页：",
+        ),
+        Style::default().fg(Color::Gray),
+    ));
+    for part in wrap_text(LOGIN_URL, inner.width as usize) {
+        lines.push(Line::raw(part));
     }
     lines.push(Line::raw(""));
     for part in wrap_text(&login.status, inner.width as usize) {
         lines.push(Line::styled(part, Style::default().fg(Color::Gray)));
     }
+    lines.push(Line::raw(""));
     lines.push(Line::styled(
         truncate(
             tr(
                 app.lang,
-                "l refresh QR · o logout · Esc browse anonymously",
-                "l 刷新二维码 · o 退出登录 · Esc 匿名浏览",
+                "b open browser · i import Firefox cookie · o logout · Esc close",
+                "b 打开浏览器 · i 导入火狐 Cookie · o 退出登录 · Esc 关闭",
             ),
             inner.width as usize,
         ),
         Style::default().fg(Color::DarkGray),
     ));
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
-}
-
-fn qr_lines(url: &str, max_width: usize, max_height: usize) -> Option<Vec<Line<'static>>> {
-    let matrix = qr::matrix(url).ok()?;
-    let quiet = 2usize;
-    let modules = matrix.len();
-    let total = modules + quiet * 2;
-    if total > max_width || total / 2 > max_height.saturating_sub(6) {
-        return None;
-    }
-    let white = Style::default().bg(Color::White).fg(Color::White);
-    let black = Style::default().bg(Color::White).fg(Color::Black);
-    let mut lines = Vec::new();
-    let mut y = 0;
-    while y < total {
-        let mut spans = Vec::with_capacity(total + 1);
-        for x in 0..total {
-            let top = qr_module(&matrix, quiet, x, y);
-            let bottom = qr_module(&matrix, quiet, x, y + 1);
-            let (ch, style) = match (top, bottom) {
-                (true, true) => ('█', black),
-                (true, false) => ('▀', black),
-                (false, true) => ('▄', black),
-                (false, false) => (' ', white),
-            };
-            spans.push(Span::styled(ch.to_string(), style));
-        }
-        lines.push(Line::from(spans));
-        y += 2;
-    }
-    Some(lines)
-}
-
-fn qr_module(matrix: &[Vec<bool>], quiet: usize, x: usize, y: usize) -> bool {
-    if x < quiet || y < quiet {
-        return false;
-    }
-    let ix = x - quiet;
-    let iy = y - quiet;
-    matrix
-        .get(iy)
-        .and_then(|row| row.get(ix))
-        .copied()
-        .unwrap_or(false)
 }
 
 fn render_input(app: &App, frame: &mut Frame, area: Rect, input: &crate::app::InputState) {

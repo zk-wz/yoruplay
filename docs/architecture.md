@@ -24,7 +24,7 @@ MPRIS (zbus) ───┘            │
 | `yoruplay-api` | Native NetEase HTTP client, crypto, cookies/session, typed raw responses. |
 | `yoruplay-ipc` | Async Unix-socket client used by TUI and CLI. |
 | `yoruplay-core` | Queue, mpv controller, persistence, cache, daemon socket server, MPRIS. |
-| `yoruplay-tui` | Ratatui UI, responsive layout, QR login, i18n labels. |
+| `yoruplay-tui` | Ratatui UI, responsive layout, Firefox login import, i18n labels. |
 | `yoruplay` (binary) | CLI dispatch, logging, daemon auto-start, service install/uninstall. |
 
 The API crate never touches playback. The TUI never touches mpv or NetEase
@@ -85,7 +85,7 @@ error code/message/hint. Events are pushed (playback, queue, auth, notice,
 shutdown); clients can also call `GetState` to resynchronise. Slow clients drop
 events rather than blocking playback.
 
-Commands cover state, login, library browsing, search, playback, seek, volume,
+Commands cover state, browser Cookie login, library browsing, search, playback, seek, volume,
 mode, queue mutations, cache clear and shutdown. Playback commands return only
 after the daemon has accepted the state update; network loads are serialised and
 superseded loads are discarded. `yoruplay shutdown` sends `Shutdown` through the

@@ -52,7 +52,7 @@ Secrets:
 
 1. Build and install.
 2. `yoruplay doctor` checks mpv, PipeWire/PulseAudio, socket and MPRIS.
-3. `yoruplay login` scans a QR.
+3. `yoruplay login` opens the official page and imports the Firefox session.
 4. `yoruplay status`, `liked`, `daily`, `fm`, `recent`, `radar`.
 5. `yoruplay start-playlist <id>`, then test all five modes.
 6. `busctl --user monitor org.mpris.MediaPlayer2.yoruplay` while using Noctalia.

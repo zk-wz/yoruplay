@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use yoruplay_ipc::IpcClient;
 use yoruplay_protocol::{
     AuthState, Command, CommandResult, ErrorInfo, Event, Language, NoticeLevel, PlayMode,
-    PlaySource, PlaybackState, PlaybackStatus, PlaylistKind, PlaylistRef, PlaylistSummary, QrLogin,
-    QrLoginStatus, QueueSnapshot, SearchItems, SearchKind, SearchPage, SongsView, StateSnapshot,
+    PlaySource, PlaybackState, PlaybackStatus, PlaylistKind, PlaylistRef, PlaylistSummary,
+    QueueSnapshot, SearchItems, SearchKind, SearchPage, SongsView, StateSnapshot, LOGIN_URL,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +165,6 @@ pub struct InputState {
 
 #[derive(Debug, Clone)]
 pub struct LoginState {
-    pub qr: Option<QrLogin>,
     pub status: String,
 }
 
@@ -217,11 +216,7 @@ pub enum RequestKind {
         offset: usize,
     },
     StartPersonalFm,
-    QrStart,
-    QrPoll {
-        key: String,
-        chain_id: String,
-    },
+    BrowserLogin,
     Logout,
     Generic {
         label: String,
@@ -256,8 +251,6 @@ pub struct App {
     pub width: u16,
     pub height: u16,
     pub search_generation: u64,
-    pub qr_poll_inflight: bool,
-    pub last_qr_poll: Instant,
     pub need_daily_after_login: bool,
     client: Arc<IpcClient>,
     responses: mpsc::Sender<UiResponse>,
@@ -305,8 +298,6 @@ impl App {
             width: 100,
             height: 30,
             search_generation: 0,
-            qr_poll_inflight: false,
-            last_qr_poll: Instant::now() - Duration::from_secs(10),
             need_daily_after_login: true,
             client,
             responses,
@@ -382,7 +373,7 @@ impl App {
                         NoticeLevel::Warning,
                         "Your NetEase session expired. Press L to log in.",
                     );
-                    self.open_login(true);
+                    self.open_login();
                 }
                 self.dirty = true;
             }
@@ -403,7 +394,7 @@ impl App {
                 Ok(CommandResult::State(snapshot)) => {
                     self.apply_snapshot(*snapshot);
                     if !self.auth.logged_in || self.auth.session_expired {
-                        self.open_login(true);
+                        self.open_login();
                     } else if self.need_daily_after_login {
                         self.need_daily_after_login = false;
                         self.load_daily_songs(false);
@@ -633,71 +624,22 @@ impl App {
                 Ok(other) => self.show_unexpected(other),
                 Err(error) => self.status_error(error),
             },
-            RequestKind::QrStart => {
-                self.qr_poll_inflight = false;
-                self.last_qr_poll = Instant::now();
-                match result {
-                    Ok(CommandResult::Qr(qr)) => {
-                        if let Some(login) = &mut self.login {
-                            login.qr = Some(qr);
-                            login.status = tr(
-                                self.lang,
-                                "Scan with the NetEase Cloud Music app",
-                                "请使用网易云音乐 App 扫码",
-                            )
-                            .into();
-                        }
-                    }
-                    Ok(other) => self.show_unexpected(other),
-                    Err(error) => {
-                        if let Some(login) = &mut self.login {
-                            login.status = error.message.clone();
-                        }
-                        self.status_error(error);
-                    }
+            RequestKind::BrowserLogin => match result {
+                Ok(CommandResult::Auth(auth)) => {
+                    self.auth = auth;
+                    self.login = None;
+                    self.set_status(NoticeLevel::Info, tr(self.lang, "Logged in.", "登录成功。"));
+                    self.need_daily_after_login = false;
+                    self.load_daily_songs(false);
                 }
-            }
-            RequestKind::QrPoll { key, chain_id: _ } => {
-                self.qr_poll_inflight = false;
-                match result {
-                    Ok(CommandResult::QrStatus { status, message }) => {
-                        if let Some(login) = &mut self.login {
-                            login.status = message;
-                            match status {
-                                QrLoginStatus::Success => {
-                                    self.login = None;
-                                    self.set_status(
-                                        NoticeLevel::Info,
-                                        tr(self.lang, "Logged in.", "登录成功。"),
-                                    );
-                                    self.need_daily_after_login = false;
-                                    self.load_daily_songs(false);
-                                }
-                                QrLoginStatus::Expired | QrLoginStatus::Cancelled => {
-                                    login.qr = None;
-                                    login.status = tr(
-                                        self.lang,
-                                        "QR expired. Press l for a new code.",
-                                        "二维码已过期，按 l 重新生成。",
-                                    )
-                                    .into();
-                                }
-                                QrLoginStatus::Waiting | QrLoginStatus::Scanned => {
-                                    let _ = key;
-                                }
-                            }
-                        }
-                        self.dirty = true;
+                Err(error) => {
+                    if let Some(login) = &mut self.login {
+                        login.status = error.message.clone();
                     }
-                    Err(error) => {
-                        if let Some(login) = &mut self.login {
-                            login.status = error.message.clone();
-                        }
-                        self.status_error(error);
-                    }
-                    Ok(other) => self.show_unexpected(other),
+                    self.status_error(error);
                 }
-            }
+                Ok(other) => self.show_unexpected(other),
+            },
             RequestKind::Logout => match result {
                 Ok(CommandResult::Auth(auth)) => {
                     self.auth = auth;
@@ -742,32 +684,52 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn open_login(&mut self, auto_start: bool) {
+    pub fn open_login(&mut self) {
         if self.login.is_none() {
-            self.login = Some(LoginState {
-                qr: None,
-                status: tr(
-                    self.lang,
-                    "Press l to request a QR code, or o to log out.",
-                    "按 l 获取登录二维码，按 o 退出登录。",
-                )
-                .into(),
-            });
-            self.qr_poll_inflight = false;
-        }
-        if auto_start && self.login.as_ref().and_then(|l| l.qr.as_ref()).is_none() {
-            self.start_qr_login();
+            let status = match self.lang {
+                Language::Zh => format!(
+                    "请在火狐浏览器打开 {LOGIN_URL} 登录，然后按 i 导入 Cookie；按 b 打开页面。"
+                ),
+                Language::En => format!(
+                    "Log in at {LOGIN_URL} in Firefox, then press i to import the cookie. Press b to open the page."
+                ),
+            };
+            self.login = Some(LoginState { status });
         }
         self.dirty = true;
     }
 
-    pub fn start_qr_login(&mut self) {
+    fn import_browser_cookie(&mut self) {
         if let Some(login) = &mut self.login {
-            login.status = tr(self.lang, "Requesting a QR code…", "正在获取二维码…").into();
-            login.qr = None;
+            login.status = tr(
+                self.lang,
+                "Reading the Firefox cookie database…",
+                "正在读取火狐 Cookie 数据库…",
+            )
+            .into();
         }
-        self.qr_poll_inflight = false;
-        self.send(RequestKind::QrStart, Command::LoginQrStart);
+        self.send(RequestKind::BrowserLogin, Command::ImportBrowserCookie);
+        self.dirty = true;
+    }
+
+    fn open_login_page(&mut self) {
+        let result = std::process::Command::new("xdg-open")
+            .arg(LOGIN_URL)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Some(login) = &mut self.login {
+            login.status = match result {
+                Ok(_) => tr(
+                    self.lang,
+                    "Opened the NetEase login page. Log in, then press i.",
+                    "已打开网易云登录页。登录后按 i 导入。",
+                )
+                .into(),
+                Err(e) => format!("could not open browser: {e}"),
+            };
+        }
         self.dirty = true;
     }
 
@@ -781,22 +743,6 @@ impl App {
         }
         if matches!(self.detail, Detail::Loading { .. }) {
             self.dirty = true;
-        }
-        let qr = self
-            .login
-            .as_ref()
-            .and_then(|login| login.qr.as_ref())
-            .map(|qr| (qr.key.clone(), qr.chain_id.clone()));
-        if let Some((key, chain_id)) = qr {
-            if !self.qr_poll_inflight && self.last_qr_poll.elapsed() >= Duration::from_secs(2) {
-                self.qr_poll_inflight = true;
-                self.last_qr_poll = Instant::now();
-                let kind = RequestKind::QrPoll {
-                    key: key.clone(),
-                    chain_id: chain_id.clone(),
-                };
-                self.send(kind, Command::LoginQrPoll { key, chain_id });
-            }
         }
     }
 
@@ -879,7 +825,8 @@ impl App {
                     self.login = None;
                     self.dirty = true;
                 }
-                KeyCode::Char('l') => self.start_qr_login(),
+                KeyCode::Char('i') => self.import_browser_cookie(),
+                KeyCode::Char('b') => self.open_login_page(),
                 KeyCode::Char('o') => {
                     self.confirm = Some(ConfirmState {
                         action: ConfirmAction::Logout,
@@ -901,7 +848,7 @@ impl App {
         if self.focus == Focus::Detail && matches!(self.detail, Detail::Account) {
             match key.code {
                 KeyCode::Char('l') => {
-                    self.open_login(true);
+                    self.open_login();
                     return;
                 }
                 KeyCode::Char('o') => {
@@ -1001,7 +948,7 @@ impl App {
             KeyCode::Char('A') => self.add_selected(true),
             KeyCode::Char('r') => self.refresh_detail(),
             KeyCode::Char('/') => self.open_search_input(),
-            KeyCode::Char('L') => self.open_login(false),
+            KeyCode::Char('L') => self.open_login(),
             KeyCode::Char('?') => {
                 self.help = true;
                 self.dirty = true;
@@ -1197,7 +1144,7 @@ impl App {
                 }
             }
             Detail::Account => {
-                self.open_login(false);
+                self.open_login();
             }
             _ => {}
         }

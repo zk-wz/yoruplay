@@ -10,7 +10,6 @@ description = "Ratatui terminal interface for YoruPlay"
 anyhow.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
-qrcode.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

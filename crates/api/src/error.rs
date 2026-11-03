@@ -77,8 +77,8 @@ impl ApiError {
             } => Some(
                 "NetEase risk control rejected this device/IP. It is not an account ban. \
                  Route music.163.com/interfacepc.music.163.com/*.126.net directly (disable \
-                 Clash TUN for them), avoid repeated QR attempts for a while, or log in on \
-                 the official web page and import the MUSIC_U cookie.",
+                 Clash TUN for them), or log in on the official web page and import \
+                 the MUSIC_U cookie.",
             ),
             _ => None,
         }

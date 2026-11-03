@@ -258,9 +258,9 @@ impl SessionData {
 
     /// Keep a stable device identity even before the first successful login.
     /// NetEase risk control treats every new device ID as a new client, so
-    /// generating a fresh one on each daemon restart makes repeated QR scans
-    /// look suspicious. Only the device/cookie state is written; there is no
-    /// secret until login succeeds.
+    /// generating a fresh one on each daemon restart makes repeated login
+    /// attempts look suspicious. Only the device/cookie state is written;
+    /// there is no secret until login succeeds.
     pub fn persist_device(&self) -> Result<(), ApiError> {
         self.write_auth_file()
     }

@@ -538,32 +538,6 @@ pub struct LikeListResponse {
     pub ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct QrKeyResponse {
-    #[serde(default)]
-    pub code: i64,
-    #[serde(default)]
-    pub unikey: Option<String>,
-    #[serde(default)]
-    pub data: Option<QrKeyData>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct QrKeyData {
-    #[serde(default)]
-    pub unikey: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct QrCheckResponse {
-    #[serde(default)]
-    pub code: i64,
-    #[serde(default)]
-    pub message: Option<String>,
-    #[serde(default)]
-    pub nickname: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

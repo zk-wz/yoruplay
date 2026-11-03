@@ -13,7 +13,7 @@ YoruPlay 已实现为一个 Rust workspace，包含：
 - 播放队列与五种播放模式
 - 系统 PATH 中 mpv 的 JSON IPC 控制器（不链接 libmpv）
 - MPRIS 2.2（`org.mpris.MediaPlayer2.yoruplay`）
-- Ratatui + Crossterm TUI、CLI、二维码登录、Cookie stdin 导入
+- Ratatui + Crossterm TUI、CLI、浏览器 Cookie 登录、Cookie stdin 导入
 - state/auth 原子持久化、受限缓存、systemd 用户服务、安装/卸载文档
 
 release 二进制已安装到 `~/.local/bin/yoruplay`。systemd 用户服务已写入
@@ -60,7 +60,7 @@ TUI / CLI / MPRIS
 `984cc021b8598cf94c22134f32a8426887fb2de7`，MIT。详细映射见
 `docs/upstream-api-map.md`。
 
-已实现：二维码 key/轮询、账号、用户歌单、喜欢列表、歌单详情/全部歌曲、搜索
+已实现：浏览器 Cookie 登录、账号、用户歌单、喜欢列表、歌单详情/全部歌曲、搜索
 （歌曲/歌手/专辑/歌单）、每日歌曲/歌单、私人漫游、私人雷达发现、最近播放、
 歌曲详情、音频 URL、歌词、心动模式。
 
@@ -79,7 +79,6 @@ eapi（上游该模块使用 xeapi），实际请求已验证可用；私人雷�
 
 ### 在线只读 API（匿名）
 
-- 二维码 key 生成、轮询 `801`、过期 `800`：通过
 - 歌曲详情、四种搜索、公开歌单 200 首完整加载、歌词：通过
 - 匿名可播放流 URL 获取：通过（免费曲目）
 - 试听曲目返回 30 秒 URL 并正确显示试听警告：通过
@@ -136,50 +135,39 @@ eapi（上游该模块使用 xeapi），实际请求已验证可用；私人雷�
 满足 <100 MiB 目标；daemon 空闲 CPU 0.0–0.3%。mpv 缓存已从 64 MiB 降到
 16 MiB forward / 4 MiB back，PSS 从约 112 MiB 降到约 60 MiB。
 
-## 5. 真实账号验收与扫码协议修正
+## 5. 登录重构与真实账号验收
 
-等待 24 小时后仍失败，进一步逐项对比并抓取官方 `https://music.163.com/login`
-页面后确认：问题不是账号封禁，也不是测试次数，而是 YoruPlay 和 upstream
-仍在使用的 **2025 年旧扫码协议**。
+二维码登录已移除。原因是网易在扫码阶段可能根据设备指纹/IP 拒绝二维码，
+服务端不会下发 802，客户端无法从 802/803 状态入手修复；继续重试只会增加风控。
 
-官方当前页面实际生成的二维码为：
+当前登录方式：
 
-```text
-https://music.163.com/st/platform/scanlogin
-  ?codekey=...
-  &chainId=v1_unknown-<随机数>_web_login_<毫秒时间戳>
-  &hdw_device=web&hdw_appid=web&hitExp=1
+```sh
+yoruplay login
 ```
 
-key/poll 使用 weapi、`type=1`、`noCheckToken=true`，poll 带
-`x-os: web`、`x-loginmethod: QrCode`、`x-login-chain-id` 和
-`ydDeviceToken`。旧实现使用 eapi、`type=3`、`/login?codekey`，且把 Android
-`deviceId` 放进 `chainId`，手机侧会在打开二维码时直接拒绝，API 一直停在
-801/800。
+打开 `https://music.163.com/login`，等待用户在火狐浏览器完成官方登录，然后
+由 daemon 读取 Firefox 的 `cookies.sqlite`：
 
-现已完成的修正：
+- 自动发现 Arch、上游、Snap、Flatpak 的 Firefox profile
+- 复制数据库和 WAL/SHM 到私有临时目录，只查询 `MUSIC_U`、`__csrf` 等
+  NetEase Cookie
+- 通过 stdin/stdout 之外的内存路径导入，不打印 Cookie
+- 调用 `/weapi/nuser/account/get` 验证后写入 0600 的 `auth.json`
+- 删除临时数据库
 
-- 二维码 key 改为 weapi `type=1`；失败时仅回退到 eapi `type=1`；
-- QR 内容改为 `/st/platform/scanlogin` 的完整参数；
-- `chainId` 使用 `sDeviceId` 或 `unknown-<随机数>`，不再使用 Android deviceId；
-- poll 使用 weapi 和官方 Web 登录 headers，并携带 `chainId`；
-- IPC 协议升级到 v2，TUI/CLI 轮询携带 `chainId`；
-- 捕获 `x-refresh-token` 作为 `MUSIC_U` 的兜底；
-- 支持 860 取消状态；8821/8810 仍给出风控提示；
-- 新增 `yoruplay shutdown`（别名 `quit`），通过 IPC 优雅关闭 daemon，
-  保存队列并回收 mpv；兼容升级前旧协议 daemon 的 shutdown 握手，systemd
-  单元无响应时回退到 `systemctl --user stop`。
+其他浏览器（Chrome/Chromium/Brave/Edge）使用 keyring 加密 Cookie，暂不自动
+读取；可用 `yoruplay login --cookie-stdin` 手动导入。TUI 登录面板支持 `b`
+打开官方页面、`i` 导入 Firefox Cookie。
 
-实机 smoke（release，单次 key/poll，未扫码）验证：weapi key 返回 200，
-二维码内容为 `/st/platform/scanlogin` 完整参数，首个 poll 为 801“等待扫码”，
-未触发 eapi 回退。实现细节、官方页面观测和 `ydDeviceToken` 限制记录在
-`docs/login-protocol.md`。**真实扫码成功路径仍需用户复测**；在 `auth.json`
-出现 0600 的 `MUSIC_U` 之前，不能声称真实账号登录已通过。
+`yoruplay shutdown`（别名 `quit`）保持可用：通过 IPC 优雅关闭 daemon、保存
+队列并回收 mpv；兼容旧协议 daemon 的 shutdown 握手，systemd 单元无响应时
+回退到 `systemctl --user stop`。
 
 ## 5.1 真实账号验证结果
 
-**二维码登录成功回调仍未完成验证**，但已通过 Firefox 官方网页会话完成 Cookie
-导入，并使用 `crates/api/tests/live_account.rs` 做只读账号校验。已验证：
+通过 Firefox 官方网页会话完成 Cookie 导入，并使用
+`crates/api/tests/live_account.rs` 做只读账号校验。已验证：
 
 - 账号资料读取
 - 创建歌单 10 个、收藏歌单 136 个
@@ -196,20 +184,17 @@ key/poll 使用 weapi、`type=1`、`noCheckToken=true`，poll 带
 
 仍未完成：
 
-- 二维码 803 成功回调（当前用 Cookie 导入绕过扫码）
 - 心动模式真实推荐：测试歌单返回“不支持该歌单类型”
 - 私人雷达：每日推荐列表在不同请求间可能不含雷达条目；daemon 使用缓存列表
 - URL 过期后的刷新、真实断网/恢复、Wi-Fi 切换、休眠唤醒、蓝牙重连、
   Noctalia 媒体面板视觉截图
 
-用户完成 `yoruplay login` 后，可运行：
+运行：
 
 ```sh
 cargo test -p yoruplay-api --test live_account -- --ignored --nocapture
 cargo test -p yoruplay-api --test live_smoke -- --ignored --nocapture
 ```
-
-以完成账号相关验收。
 
 ## 6. Git 提交
 
@@ -243,7 +228,7 @@ cedd914 fix: harden MPRIS signals, persistence and TUI edge cases
 ## 8. 使用
 
 ```sh
-yoruplay login          # 扫码（服务已在运行）
+yoruplay login          # 打开官方登录页并导入 Firefox Cookie
 yoruplay                # TUI
 yoruplay status
 yoruplay fm / daily / radar / liked / recent / search ...

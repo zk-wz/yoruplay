@@ -62,7 +62,7 @@ and cgroup accounting, while the PSS sum is ≈66 MiB.
   final track.
 - Queue and mode/volume persistence across daemon restart; service stop reaps
   mpv and removes the socket; service restart restores queue and position.
-- TUI search (anonymous), queue view, help overlay, login QR rendering,
+- TUI search (anonymous), queue view, help overlay, login panel,
   responsive single-column layout, exit while playing, reconnection to the
   running daemon, English/Chinese label unit checks.
 - Unauthenticated guard: Heartbeat with a public playlist context is accepted,
@@ -71,12 +71,12 @@ and cgroup accounting, while the PSS sum is ≈66 MiB.
 
 ## Not completed
 
-- **Real NetEase account login**: no QR scan was confirmed during this run.
+- **Real NetEase account login**: verified by importing a Firefox web session.
   Therefore account-only data and flows (personal playlists, liked songs,
   daily recommendations, Personal FM, Private Radar, recently played, Heartbeat
   recommendation API, real-account stream quality) are implemented and
   unit/fixture-tested but **not verified against a real account**.
-- Real QR success path, session persistence after login, session expiry against
+- Session persistence after login, session expiry against
   the live server.
 - URL-expiry refresh after a 20-minute pause, live network loss/recovery, Wi-Fi
   switch, suspend/resume, Bluetooth disconnect/reconnect were not reproduced in

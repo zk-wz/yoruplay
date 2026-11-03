@@ -9,16 +9,15 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use yoruplay_protocol::{
     AlbumSummary, ArtistSummary, AuthState, PlaylistKind, PlaylistRef, PlaylistSummary,
-    PlaylistTracks, QrLogin, QrLoginStatus, Quality, SearchItems, SearchKind, SearchPage, Song,
-    SongsView, UserProfile,
+    PlaylistTracks, Quality, SearchItems, SearchKind, SearchPage, Song, SongsView, UserProfile,
 };
 
 use crate::crypto::{eapi_encrypt, random_weapi_secret, weapi_encrypt};
 use crate::raw::{
     AccountResponse, AlbumResponse, ArtistSongsResponse, DailySongsResponse, FmResponse,
-    LikeListResponse, LyricResponse, PlaylistDetailResponse, QrCheckResponse, QrKeyResponse,
-    RawPlaylist, RawSong, RecommendResourceResponse, SearchResponse, SongDetailResponse,
-    StreamResponse, UserPlaylistsResponse,
+    LikeListResponse, LyricResponse, PlaylistDetailResponse, RawPlaylist, RawSong,
+    RecommendResourceResponse, SearchResponse, SongDetailResponse, StreamResponse,
+    UserPlaylistsResponse,
 };
 use crate::session::{now_ms, SessionData};
 use crate::ApiError;
@@ -27,7 +26,6 @@ const WEAPI_HOST: &str = "https://music.163.com";
 const EAPI_HOST: &str = "https://interfacepc.music.163.com";
 const WEAPI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
 const EAPI_UA: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
-const QR_SCANLOGIN_URL: &str = "https://music.163.com/st/platform/scanlogin";
 const MAX_SONG_DETAIL_CHUNK: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,12 +64,6 @@ pub struct StreamUrl {
 pub struct Lyrics {
     pub lrc: String,
     pub translated: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct QrPollResult {
-    pub status: QrLoginStatus,
-    pub message: String,
 }
 
 #[derive(Clone)]
@@ -162,16 +154,6 @@ impl NeteaseClient {
         path: &str,
         payload: Value,
     ) -> Result<Value, ApiError> {
-        self.post_json_with_headers(mode, path, payload, &[]).await
-    }
-
-    async fn post_json_with_headers(
-        &self,
-        mode: CryptoMode,
-        path: &str,
-        payload: Value,
-        extra_headers: &[(&str, &str)],
-    ) -> Result<Value, ApiError> {
         let request_id = format!("{}_{:04}", now_ms(), rand::thread_rng().gen_range(0..1000));
         let endpoint_path = path
             .strip_prefix("/api/")
@@ -248,9 +230,6 @@ impl NeteaseClient {
         if let Some(referer) = referer {
             builder = builder.header(REFERER, referer);
         }
-        for (name, value) in extra_headers {
-            builder = builder.header(*name, *value);
-        }
         let response = builder.form(&form).send().await.map_err(|e| {
             if e.is_timeout() {
                 ApiError::Timeout
@@ -266,15 +245,6 @@ impl NeteaseClient {
             .filter_map(|v| v.to_str().ok())
             .map(str::to_string)
             .collect();
-        // The modern web login returns the credential in this header as well
-        // as Set-Cookie. Keep it as a fallback for environments where the
-        // cookie header is stripped by a proxy.
-        let refresh_token = response
-            .headers()
-            .get("x-refresh-token")
-            .and_then(|v| v.to_str().ok())
-            .filter(|v| !v.is_empty())
-            .map(str::to_string);
         let body = response.text().await.map_err(|e| {
             if e.is_timeout() {
                 ApiError::Timeout
@@ -282,17 +252,9 @@ impl NeteaseClient {
                 ApiError::Network(e.to_string())
             }
         })?;
-        if !set_cookies.is_empty() || refresh_token.is_some() {
+        if !set_cookies.is_empty() {
             let mut session = self.session.write().await;
             session.merge_cookies(set_cookies.iter().map(String::as_str));
-            if path == "/api/login/qrcode/client/login" {
-                if let Some(token) = refresh_token {
-                    if session.cookie("MUSIC_U").is_none() {
-                        let cookie = format!("MUSIC_U={token}");
-                        session.merge_cookies([cookie.as_str()]);
-                    }
-                }
-            }
         }
         let parsed = serde_json::from_str::<Value>(&body);
         match parsed {
@@ -415,152 +377,6 @@ impl NeteaseClient {
             let _ = self.account().await?;
         }
         Ok(self.auth_state().await)
-    }
-
-    pub async fn start_qr_login(&self) -> Result<QrLogin, ApiError> {
-        // NetEase's current web QR login uses weapi, type=1 and a web login
-        // chain id. If this cookie jar cannot initialise the web endpoint,
-        // retry the same type=1 key through eapi; never fall back to the old
-        // /login?codekey URL.
-        let web_headers = [
-            ("x-os", "web"),
-            ("x-channelsource", "undefined"),
-            ("nm-gcore-status", "1"),
-        ];
-        let key = match self.request_qr_key(CryptoMode::Weapi, &web_headers).await {
-            Ok(key) => key,
-            Err(web_error) => {
-                tracing::warn!(
-                    error = %web_error.user_message(),
-                    "web QR key failed; falling back to eapi"
-                );
-                self.request_qr_key(CryptoMode::Eapi, &[]).await?
-            }
-        };
-        let chain_id = {
-            let session = self.session.read().await;
-            make_chain_id(session.cookie("sDeviceId"), now_ms())
-        };
-        Ok(QrLogin {
-            url: scan_login_url(&key, &chain_id),
-            key,
-            chain_id,
-        })
-    }
-
-    async fn request_qr_key(
-        &self,
-        mode: CryptoMode,
-        headers: &[(&str, &str)],
-    ) -> Result<String, ApiError> {
-        let value = self
-            .post_json_with_headers(
-                mode,
-                "/api/login/qrcode/unikey",
-                json!({ "type": 1, "noCheckToken": true }),
-                headers,
-            )
-            .await?;
-        let code = json_i64(&value, "code").unwrap_or(200);
-        if code != 200 {
-            return Err(ApiError::Api {
-                code,
-                message: value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("QR login could not be started")
-                    .into(),
-                endpoint: "/api/login/qrcode/unikey".into(),
-            });
-        }
-        qr_key_from_value(value)
-    }
-
-    pub async fn poll_qr_login(&self, key: &str, chain_id: &str) -> Result<QrPollResult, ApiError> {
-        let headers = [
-            ("x-os", "web"),
-            ("x-channelsource", "undefined"),
-            ("nm-gcore-status", "1"),
-            ("x-loginmethod", "QrCode"),
-            ("x-login-chain-id", chain_id),
-        ];
-        let value = self
-            .post_json_with_headers(
-                CryptoMode::Weapi,
-                "/api/login/qrcode/client/login",
-                json!({
-                    "key": key,
-                    "type": 1,
-                    "noCheckToken": true,
-                    // The official page obtains this from NetEase's
-                    // fingerprint SDK. Native clients without that SDK fall
-                    // back to an empty value; if the server starts requiring
-                    // a real token, login needs a browser/WebView helper.
-                    "ydDeviceToken": "",
-                }),
-                &headers,
-            )
-            .await?;
-        let code = json_i64(&value, "code").unwrap_or(0);
-        let response: QrCheckResponse =
-            serde_json::from_value(value).map_err(|e| ApiError::Decode {
-                endpoint: "/api/login/qrcode/client/login".into(),
-                message: e.to_string(),
-            })?;
-        let message = response.message.clone().unwrap_or_else(|| match code {
-            800 => "QR code expired".into(),
-            801 => "Waiting for scan".into(),
-            802 => "Scanned, waiting for confirmation".into(),
-            803 => "Login successful".into(),
-            860 => "QR login was cancelled".into(),
-            _ => format!("QR login status {code}"),
-        });
-        if code == 801 {
-            tracing::debug!(code, %message, "QR login poll");
-        } else {
-            tracing::info!(code, %message, "QR login state");
-        }
-        let status = match qr_status(code) {
-            Some(status) => status,
-            None => {
-                tracing::warn!(code, %message, "QR login rejected");
-                return Err(ApiError::Api {
-                    code,
-                    message,
-                    endpoint: "/api/login/qrcode/client/login".into(),
-                });
-            }
-        };
-        if status == QrLoginStatus::Success {
-            let mut profile = None;
-            for attempt in 0..2 {
-                match self.fetch_account().await {
-                    Ok(Some(p)) => {
-                        profile = Some(p);
-                        break;
-                    }
-                    Ok(None) | Err(ApiError::AuthRequired) | Err(ApiError::SessionExpired) => {
-                        if attempt == 0 {
-                            tokio::time::sleep(Duration::from_millis(400)).await;
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            let Some(profile) = profile else {
-                return Err(ApiError::Api {
-                    code: 803,
-                    message: "Login succeeded, but the account profile was empty; try again".into(),
-                    endpoint: "/api/nuser/account/get".into(),
-                });
-            };
-            let mut session = self.session.write().await;
-            session.set_profile(profile);
-            if let Err(e) = session.persist() {
-                tracing::warn!(error = %e, "failed to persist QR login session");
-            }
-        }
-        Ok(QrPollResult { status, message })
     }
 
     pub async fn import_cookie(&self, cookie: &str) -> Result<UserProfile, ApiError> {
@@ -1226,50 +1042,6 @@ impl NeteaseClient {
     }
 }
 
-pub fn make_chain_id(s_device_id: Option<&str>, timestamp_ms: u64) -> String {
-    // Matches the official web login: use the browser's sDeviceId when one
-    // exists, otherwise an `unknown-<number>` fallback. An eapi Android
-    // deviceId is not a web login device and must not be used here.
-    let device = s_device_id
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("unknown-{}", rand::thread_rng().gen_range(0..1_000_000u32)));
-    format!("v1_{device}_web_login_{timestamp_ms}")
-}
-
-fn scan_login_url(key: &str, chain_id: &str) -> String {
-    format!(
-        "{QR_SCANLOGIN_URL}?codekey={key}&chainId={chain_id}\
-         &hdw_device=web&hdw_appid=web&hitExp=1"
-    )
-}
-
-fn qr_key_from_value(value: Value) -> Result<String, ApiError> {
-    let response: QrKeyResponse = serde_json::from_value(value).map_err(|e| ApiError::Decode {
-        endpoint: "/api/login/qrcode/unikey".into(),
-        message: e.to_string(),
-    })?;
-    response
-        .unikey
-        .or_else(|| response.data.and_then(|d| d.unikey))
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| ApiError::Decode {
-            endpoint: "/api/login/qrcode/unikey".into(),
-            message: "missing unikey".into(),
-        })
-}
-
-fn qr_status(code: i64) -> Option<QrLoginStatus> {
-    match code {
-        800 => Some(QrLoginStatus::Expired),
-        801 => Some(QrLoginStatus::Waiting),
-        802 => Some(QrLoginStatus::Scanned),
-        803 => Some(QrLoginStatus::Success),
-        860 => Some(QrLoginStatus::Cancelled),
-        _ => None,
-    }
-}
-
 fn json_i64(value: &Value, key: &str) -> Option<i64> {
     match value.get(key)? {
         Value::Number(n) => n.as_i64(),
@@ -1457,43 +1229,6 @@ mod tests {
         let mut seen = HashSet::new();
         levels.retain(|q| seen.insert(q.as_str()));
         assert_eq!(levels, vec![Quality::Exhigh, Quality::Standard]);
-    }
-
-    #[test]
-    fn web_chain_id_uses_web_device_or_unknown_fallback() {
-        assert_eq!(
-            make_chain_id(Some("YD-ABCDEF"), 1_700_000_000_000),
-            "v1_YD-ABCDEF_web_login_1700000000000"
-        );
-        let fallback = make_chain_id(None, 1_700_000_000_000);
-        assert!(
-            fallback.starts_with("v1_unknown-"),
-            "unexpected fallback: {fallback}"
-        );
-        assert!(
-            fallback.ends_with("_web_login_1700000000000"),
-            "unexpected fallback: {fallback}"
-        );
-    }
-
-    #[test]
-    fn scan_login_url_matches_current_web_flow() {
-        assert_eq!(
-            scan_login_url("key-1", "v1_unknown-42_web_login_123"),
-            "https://music.163.com/st/platform/scanlogin?codekey=key-1\
-             &chainId=v1_unknown-42_web_login_123\
-             &hdw_device=web&hdw_appid=web&hitExp=1"
-        );
-    }
-
-    #[test]
-    fn qr_status_maps_known_codes() {
-        assert_eq!(qr_status(800), Some(QrLoginStatus::Expired));
-        assert_eq!(qr_status(801), Some(QrLoginStatus::Waiting));
-        assert_eq!(qr_status(802), Some(QrLoginStatus::Scanned));
-        assert_eq!(qr_status(803), Some(QrLoginStatus::Success));
-        assert_eq!(qr_status(860), Some(QrLoginStatus::Cancelled));
-        assert_eq!(qr_status(8821), None);
     }
 
     #[test]

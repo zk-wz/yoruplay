@@ -9,6 +9,6 @@ pub mod error;
 pub mod raw;
 pub mod session;
 
-pub use client::{Lyrics, NeteaseClient, QrPollResult, StreamUrl};
+pub use client::{Lyrics, NeteaseClient, StreamUrl};
 pub use crypto::CryptoError;
 pub use error::ApiError;

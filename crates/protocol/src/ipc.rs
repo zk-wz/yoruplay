@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{
     AuthState, Notice, PlayMode, PlaybackState, PlaylistRef, PlaylistSummary, PlaylistTracks,
-    QrLogin, QrLoginStatus, QueueSnapshot, SearchKind, SearchPage, Song, StateSnapshot,
+    QueueSnapshot, SearchKind, SearchPage, Song, StateSnapshot,
 };
 
 /// Bumped whenever the request/response names or semantics change. Clients
 /// with a different version are rejected with a readable error.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Refuse absurd frames before attempting to allocate/deserialize them.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
@@ -35,12 +35,7 @@ pub enum Command {
     GetState,
     Shutdown,
 
-    LoginQrStart,
-    LoginQrPoll {
-        key: String,
-        #[serde(default)]
-        chain_id: String,
-    },
+    ImportBrowserCookie,
     ImportCookie {
         cookie: String,
     },
@@ -160,11 +155,6 @@ pub enum CommandResult {
     Songs(SongsView),
     PlaylistTracks(PlaylistTracks),
     Search(SearchPage),
-    Qr(QrLogin),
-    QrStatus {
-        status: QrLoginStatus,
-        message: String,
-    },
     Auth(AuthState),
 }
 

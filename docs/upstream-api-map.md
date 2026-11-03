@@ -21,7 +21,7 @@ The port covers only endpoints YoruPlay needs. The Rust code lives in
 | `crypto::random_weapi_secret` | `weapi` | Base62, 16 characters. |
 | `client::NeteaseClient::post_json` | `util/request.js` | Reuses one reqwest pool, form encoding, cookie handling, eapi/weapi only. |
 | `session::SessionData` | cookie helpers in `util/request.js` / `util/index.js` | Device identity, `MUSIC_U`, `__csrf`, `NMTID`, atomic 0600 persistence. |
-| `client::QrLogin` / QR URL | current official web page | Uses the 2026 web flow: weapi `type=1`, `/st/platform/scanlogin`, `hdw_device=web&hdw_appid=web&hitExp=1`, `chainId=v1_<sDeviceId-or-unknown-N>_web_login_<ms>`, and web login headers. Upstream still ships the obsolete `/login?codekey` flow. ANSI/SVG QR rendered by YoruPlay. |
+| `browser_login::firefox_cookie_header` | no direct upstream module | Reads Firefox's plaintext `cookies.sqlite` (copying WAL/SHM) and returns only NetEase cookies for `SessionData::import_cookie_string`. Other browsers need manual `--cookie-stdin` because their stores are keyring-encrypted. |
 
 Deliberate differences:
 
@@ -36,8 +36,6 @@ Deliberate differences:
 
 | Rust method | Upstream module | Endpoint | Crypto | Status / differences |
 |---|---|---|---|---|
-| `start_qr_login` | `login_qr_key.js` | `/api/login/qrcode/unikey` | eapi | Live-tested waiting state. |
-| `poll_qr_login` | `login_qr_check.js` | `/api/login/qrcode/client/login` | eapi | Handles 800/801/802/803, profile fetch, session persistence. |
 | `account`, `validate_session` | `user_account.js` | `/api/nuser/account/get` | weapi | Live-tested. |
 | `playlists(Created/Subscribed)` | `user_playlist.js` | `/api/user/playlist` | weapi | Paginates with `more`; splits by `subscribed`; hides specialType 5 from Created. |
 | `playlist_tracks` | `playlist_detail.js`, `playlist_track_all.js`, `song_detail.js` | `/api/v6/playlist/detail`, `/api/v3/song/detail` | eapi/eapi | Uses the ordered/deduplicated `trackIds`; chunked song details (500); 5-minute in-memory detail cache. |
@@ -61,17 +59,17 @@ Deliberate differences:
 - Unit tests pin eapi/weapi ciphertext vectors generated from a development-time
   Node reference, cookie parsing/encoding, persistence permissions, fixture
   deserialisation and queue/mode state machines.
-- Anonymous live smoke: QR key/poll, song detail, search (all four types),
-  public playlist tracks, lyrics. See `crates/api/tests/live_smoke.rs`.
-- Anonymous live verification succeeded for: QR key/poll/expiry, song detail,
-  search (songs/artists/albums/playlists), public playlist tracks, lyrics,
-  stream URL for free/trial tracks, and actual mpv playback through
-  pipewire-pulse.
-- **Real-account verification was not completed**: no QR scan was confirmed in
-  this environment. Personal lists, daily data, Personal FM, Private Radar,
-  recently played, Heartbeat recommendation, and account-quality streams remain
-  implemented but not live-verified. This is recorded in
-  `docs/resource-usage.md` and the final delivery report.
+- Anonymous live smoke: song detail, search (all four types), public playlist
+  tracks, lyrics. See `crates/api/tests/live_smoke.rs`.
+- Anonymous live verification succeeded for: song detail, search
+  (songs/artists/albums/playlists), public playlist tracks, lyrics, stream URL
+  for free/trial tracks, and actual mpv playback through pipewire-pulse.
+- Real-account verification succeeded after importing a Firefox `MUSIC_U`
+  session: profile, 10 created/136 subscribed playlists, 924 liked songs, daily
+  songs/playlists, Personal FM, 100 recent songs, all search kinds, exhigh
+  320 kbps stream URL and lyrics. Heartbeat still reports
+  `不支持该歌单类型` for the tested created playlist; Private Radar can be
+  absent from a later daily recommendation response.
 
 ## Updating from upstream
 
@@ -83,4 +81,4 @@ Deliberate differences:
 4. Update fixtures from sanitized, small real responses; never include a real
    cookie, token or account identifier.
 5. Update this table's commit SHA and run `cargo test --workspace` plus the live
-   smoke test. Real-account endpoints require the account owner's QR scan.
+   smoke test. Real-account endpoints require an imported browser session.

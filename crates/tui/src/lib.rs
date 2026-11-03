@@ -1,7 +1,6 @@
 //! YoruPlay terminal interface.
 
 pub mod app;
-pub mod qr;
 pub mod ui;
 
 use yoruplay_protocol::{Config, Paths};

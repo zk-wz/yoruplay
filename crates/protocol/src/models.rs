@@ -422,26 +422,6 @@ pub struct Notice {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QrLoginStatus {
-    Waiting,
-    Scanned,
-    Expired,
-    Success,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QrLogin {
-    pub key: String,
-    pub url: String,
-    /// Web login chain id. It must be sent back with every QR poll so the
-    /// server can bind the scan to the browser-like login that created it.
-    #[serde(default)]
-    pub chain_id: String,
-}
-
 impl Song {
     pub fn empty_with_id(id: u64) -> Self {
         Self {

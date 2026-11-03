@@ -6,6 +6,9 @@
 
 pub mod config;
 pub mod ipc;
+
+/// Official NetEase web login page used by browser-assisted login.
+pub const LOGIN_URL: &str = "https://music.163.com/login";
 pub mod models;
 pub mod paths;
 

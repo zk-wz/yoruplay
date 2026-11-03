@@ -12,10 +12,11 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use yoruplay_api::{ApiError, Lyrics, NeteaseClient};
 use yoruplay_protocol::{
     AuthState, Command, CommandResult, ErrorInfo, Event, Notice, NoticeLevel, PlayMode, PlaySource,
-    PlaybackState, PlaybackStatus, PlaylistRef, PlaylistSummary, PlaylistTracks, QrLogin,
-    QrLoginStatus, QueueItem, QueueSnapshot, Song, SongsView, StateSnapshot,
+    PlaybackState, PlaybackStatus, PlaylistRef, PlaylistSummary, PlaylistTracks, QueueItem,
+    QueueSnapshot, Song, SongsView, StateSnapshot,
 };
 
+use crate::browser_login::{self, BrowserLoginError};
 use crate::cache::FileCache;
 use crate::mpv::{MpvController, MpvError, MpvEvent, MpvOptions};
 use crate::queue::{Advance, Queue, QueueError, RemoveOutcome};
@@ -32,6 +33,8 @@ pub enum ServiceError {
     #[error("{0}")]
     Queue(#[from] QueueError),
     #[error("{0}")]
+    Browser(#[from] BrowserLoginError),
+    #[error("{0}")]
     Invalid(String),
     #[error("{0}")]
     Unsupported(String),
@@ -45,6 +48,7 @@ impl ServiceError {
             ServiceError::Mpv(_) => "mpv_error",
             ServiceError::Queue(QueueError::HeartbeatRequiresContext) => "heartbeat_unavailable",
             ServiceError::Queue(_) => "queue_error",
+            ServiceError::Browser(e) => e.code(),
             ServiceError::Invalid(_) => "invalid_argument",
             ServiceError::Unsupported(_) => "unsupported",
         }
@@ -80,6 +84,7 @@ impl ServiceError {
                 Some("Open a playlist, play a song, then enable Heartbeat.".into()),
             ),
             ServiceError::Queue(e) => (e.to_string(), None),
+            ServiceError::Browser(e) => (e.to_string(), e.hint().map(str::to_string)),
             ServiceError::Invalid(e) => (e, None),
             ServiceError::Unsupported(e) => (e, None),
         };
@@ -171,7 +176,6 @@ struct DaemonInner {
     generation: AtomicU64,
     events: broadcast::Sender<Event>,
     shutdown_tx: watch::Sender<bool>,
-    pending_qr: Mutex<Option<QrLogin>>,
     last_save: Mutex<Instant>,
     shutting_down: AtomicBool,
     mpv_event_tx: mpsc::Sender<(u64, MpvEvent)>,
@@ -279,7 +283,6 @@ impl Daemon {
                 generation: AtomicU64::new(0),
                 events,
                 shutdown_tx,
-                pending_qr: Mutex::new(None),
                 last_save,
                 shutting_down: AtomicBool::new(false),
                 mpv_event_tx,
@@ -493,23 +496,11 @@ impl Daemon {
                 });
                 Ok(CommandResult::ack_msg("Shutting down"))
             }
-            Command::LoginQrStart => {
-                let qr = self.inner.api.start_qr_login().await?;
-                *self.inner.pending_qr.lock().await = Some(qr.clone());
-                Ok(CommandResult::Qr(qr))
-            }
-            Command::LoginQrPoll { key, chain_id } => {
-                let result = self.inner.api.poll_qr_login(&key, &chain_id).await?;
-                if result.status == QrLoginStatus::Success
-                    || result.status == QrLoginStatus::Expired
-                {
-                    *self.inner.pending_qr.lock().await = None;
-                    self.sync_auth().await;
-                }
-                Ok(CommandResult::QrStatus {
-                    status: result.status,
-                    message: result.message,
-                })
+            Command::ImportBrowserCookie => {
+                let cookie = browser_login::firefox_cookie_header()?;
+                self.inner.api.import_cookie(&cookie).await?;
+                self.sync_auth().await;
+                Ok(CommandResult::Auth(self.auth().await))
             }
             Command::ImportCookie { cookie } => {
                 self.inner.api.import_cookie(&cookie).await?;
