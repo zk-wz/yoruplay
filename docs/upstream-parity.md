@@ -11,7 +11,7 @@ login and request risk; it is not a feature-parity checklist.
 |---|---|---|
 | Playback | external `mpv` over JSON IPC | embedded `rodio` + Symphonia |
 | Process model | daemon + TUI/CLI/MPRIS clients | TUI or `-d` headless process |
-| Audio cache | no audio cache; 32 MiB metadata cache | 2 GiB default audio/content/covers cache |
+| Cache policy | no audio cache; 32 MiB metadata cache | runtime audio/content/cover disk-cache **budget** of 2 GiB (a cap, not preallocated; pigma source itself is only a few MiB) |
 | Login | official web page + Firefox cookie | QR code or password/captcha in `ncm-api` |
 | Persistent session | `auth.json` 0600 | `cookies.json` |
 
@@ -63,17 +63,17 @@ fingerprint. The imported browser cookie supplies the web `sDeviceId` and
   6.7 MiB measurement was an empty, anonymous state.
 - Playback: mpv about 56 MiB PSS after reducing its cache to 8 MiB forward /
   2 MiB back / 30 s; daemon about 11 MiB. Total around 67 MiB.
-- pigma has a much larger default cache (2 GiB) and keeps cover/image/decoder
-  state in the same process. A direct pigma PSS measurement is not part of the
-  YoruPlay test suite; do not claim a playback-memory win without measuring the
-  exact pigma release.
+- pigma has a much larger default **disk-cache budget** (2 GiB, not allocated
+  up front) and keeps cover/image/decoder state in the same process. A direct
+  pigma PSS measurement is not part of the YoruPlay test suite; do not claim a
+  playback-memory win without measuring the exact pigma release.
 - YoruPlay's playlist metadata cache is bounded to 8 entries and 20,000
   tracks/entry; browsing very large playlists no longer grows memory without
   limit.
 
 ## What YoruPlay does not copy
 
-- pigma's random UA / embedded decoder / 2 GiB cache.
+- pigma's random UA, embedded decoder and 2 GiB disk-cache budget.
 - QR login, password login and captcha flows.
 - pigma's `MUSIC_U || __csrf` logged-in heuristic; YoruPlay requires `MUSIC_U`.
 - pigma's request-level CSRF query duplication; the payload form works.
