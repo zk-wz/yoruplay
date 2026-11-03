@@ -199,6 +199,9 @@ cargo test -p yoruplay-api --test live_smoke -- --ignored --nocapture
 ## 6. Git 提交
 
 ```text
+133085e feat(auth): replace QR login with Firefox cookie import
+e3cacdd fix(api): tolerate null arrays in real account responses
+dcb6e0a docs: record QR login follow-up and shutdown command
 6c0ed70 fix(auth): adopt current web QR login and add daemon shutdown
 21e5004 fix(auth): use web chainId and stable pre-login device
 f7be1d0 docs: add final delivery report
