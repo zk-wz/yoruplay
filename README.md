@@ -39,7 +39,7 @@ the same daemon and queue.
 Arch Linux:
 
 ```sh
-sudo pacman -S mpv pipewire pipewire-pulse wireplumber
+sudo pacman -S mpv pipewire pipewire-pulse wireplumber sqlite
 ```
 
 Rust stable (1.85+) is enough to build. No root privileges are needed at
@@ -111,9 +111,19 @@ TUI with `q` does not stop the daemon.
 yoruplay login
 ```
 
-This opens `https://music.163.com/login` in the default browser and waits for a
-`MUSIC_U` cookie in Firefox. It then imports the session, validates it with the
-NetEase account endpoint, and writes `auth.json` with mode `0600`.
+If Firefox already has a valid `MUSIC_U` session, this imports it immediately
+without opening a browser. It validates the session and writes `auth.json` with
+mode `0600`. Only when no valid Firefox session exists does it open
+`https://music.163.com/login` and wait for login.
+
+To change accounts, force the browser flow:
+
+```sh
+yoruplay login --switch-account   # alias: --force
+```
+
+This opens the official page and waits until Firefox holds a different account
+cookie than the current one.
 
 Firefox is the only browser read automatically. Its profiles are discovered in
 the Arch (`~/.config/mozilla/firefox`), upstream, Snap and Flatpak locations.

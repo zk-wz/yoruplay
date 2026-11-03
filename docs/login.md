@@ -11,13 +11,27 @@ browser's existing session.
 yoruplay login
 ```
 
-The command:
+The command uses the system `sqlite3` binary to read the copied Firefox
+database. Install the Arch `sqlite` package if it is missing.
 
-1. opens `https://music.163.com/login` with `xdg-open`;
-2. waits for a `MUSIC_U` cookie in Firefox's cookie database;
+It:
+
+1. first reads Firefox's existing `MUSIC_U` session and imports it **without
+   opening a browser**;
+2. only if no valid session exists, opens `https://music.163.com/login` with
+   `xdg-open` and waits for login;
 3. copies only the NetEase cookies it needs to a private temporary database;
 4. validates the session with `/weapi/nuser/account/get`;
 5. writes `auth.json` with mode `0600`.
+
+To switch accounts even when the current Firefox session is valid:
+
+```sh
+yoruplay login --switch-account   # alias: --force
+```
+
+This always opens the browser and waits until Firefox holds a different
+`MUSIC_U` than the current YoruPlay session.
 
 Firefox profiles are discovered under:
 

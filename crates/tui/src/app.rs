@@ -708,7 +708,10 @@ impl App {
             )
             .into();
         }
-        self.send(RequestKind::BrowserLogin, Command::ImportBrowserCookie);
+        self.send(
+            RequestKind::BrowserLogin,
+            Command::ImportBrowserCookie { force: false },
+        );
         self.dirty = true;
     }
 

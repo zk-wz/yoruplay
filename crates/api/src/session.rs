@@ -64,7 +64,7 @@ impl Device {
             osver: "14".into(),
             appver: EAPI_APPVER.into(),
             channel: "xiaomi".into(),
-            device_id: random_hex(&mut rng, 32).to_uppercase(),
+            device_id: random_hex(&mut rng, 26).to_uppercase(),
             nnid: format!("{nuid},{now_ms}"),
             nuid,
             wnmcid: format!("{}.{}.01.0", random_letters(&mut rng, 6), now_ms),

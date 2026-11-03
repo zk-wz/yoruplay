@@ -154,6 +154,9 @@ struct LoginArgs {
     /// Read a Cookie header from stdin (MUSIC_U required). Avoids shell history.
     #[arg(long)]
     cookie_stdin: bool,
+    /// Open the browser even when a Firefox session is already available.
+    #[arg(long, visible_alias = "force")]
+    switch_account: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -601,17 +604,68 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
         client.close().await;
         print_auth_result(result)
     } else {
-        println!("Opening {LOGIN_URL} in your browser.");
-        open_login_page();
-        println!("Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...");
-        println!("Other browsers are not supported yet; use --cookie-stdin for those.");
-        for _ in 0..150 {
-            match client.request(Command::ImportBrowserCookie).await {
+        // Fast path: a valid Firefox session is enough; do not open a browser.
+        if !args.switch_account {
+            match client
+                .request(Command::ImportBrowserCookie { force: false })
+                .await
+            {
                 Ok(result) => {
                     client.close().await;
                     return print_auth_result(result);
                 }
-                Err(error) if error.code == "browser_cookie_missing" => {
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "browser_cookie_missing"
+                            | "browser_profile_missing"
+                            | "invalid_cookie"
+                            | "not_logged_in"
+                            | "session_expired"
+                            | "api_error"
+                    ) => {}
+                Err(error) => {
+                    client.close().await;
+                    return Err(ipc_error(error));
+                }
+            }
+        }
+
+        println!("Opening {LOGIN_URL} in your browser.");
+        open_login_page();
+        println!("Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...");
+        println!("Other browsers are not supported yet; use --cookie-stdin for those.");
+        let mut same_account_reported = false;
+        for _ in 0..150 {
+            match client
+                .request(Command::ImportBrowserCookie {
+                    force: args.switch_account,
+                })
+                .await
+            {
+                Ok(result) => {
+                    client.close().await;
+                    return print_auth_result(result);
+                }
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "browser_cookie_missing"
+                            | "invalid_cookie"
+                            | "not_logged_in"
+                            | "session_expired"
+                            | "api_error"
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(error) if error.code == "browser_same_account" => {
+                    if !same_account_reported {
+                        println!(
+                            "Firefox is still logged in as the current account; switch accounts there."
+                        );
+                        same_account_reported = true;
+                    }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
                 Err(error) => {

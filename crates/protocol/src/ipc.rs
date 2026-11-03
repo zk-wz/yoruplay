@@ -7,7 +7,7 @@ use crate::models::{
 
 /// Bumped whenever the request/response names or semantics change. Clients
 /// with a different version are rejected with a readable error.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Refuse absurd frames before attempting to allocate/deserialize them.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
@@ -35,7 +35,10 @@ pub enum Command {
     GetState,
     Shutdown,
 
-    ImportBrowserCookie,
+    ImportBrowserCookie {
+        #[serde(default)]
+        force: bool,
+    },
     ImportCookie {
         cookie: String,
     },

@@ -124,16 +124,16 @@ eapi（上游该模块使用 xeapi），实际请求已验证可用；私人雷�
 
 | 场景 | 总 PSS | 说明 |
 |---|---:|---|
-| daemon 空闲 | **6.7 MiB** | RSS 9.9 MiB，9 线程，无 mpv，cgroup MemoryCurrent 3.2 MiB |
-| daemon + TUI | **≈10 MiB** | TUI 3.2 MiB |
-| 正常播放（daemon + mpv） | **62–81 MiB** | mpv 60–78 MiB；daemon 2.2–3.3 MiB |
-| 播放 + TUI | **≈67 MiB** | TUI 3.2 MiB |
-| 试听流 | **68.4 MiB** | mpv 启动峰值 |
-| 长时间暂停 30 秒 | 81.6 MiB | Position 完全冻结，恢复成功 |
-| 缓存 | 浏览后约 60 KiB | 已清除 |
+| daemon 空闲（匿名空队列，历史） | **6.7 MiB** | RSS 9.9 MiB，9 线程，无 mpv |
+| daemon 当前（已登录 + 10 首队列） | **10.3–10.8 MiB** | RSS 13.6–14.1 MiB，10 线程，无 mpv |
+| daemon + TUI（历史） | **≈10 MiB** | TUI 3.2 MiB |
+| 正常播放（daemon + mpv） | **≈67.2 MiB** | daemon 10.8 MiB + mpv 56.4 MiB |
+| 缓存 | 32 MiB 上限 | 浏览后约 60 KiB；无音频缓存 |
 
-满足 <100 MiB 目标；daemon 空闲 CPU 0.0–0.3%。mpv 缓存已从 64 MiB 降到
-16 MiB forward / 4 MiB back，PSS 从约 112 MiB 降到约 60 MiB。
+满足 <100 MiB 目标；daemon 空闲 CPU 0.0–0.3%。mpv 缓存从 16 MiB / 4 MiB / 60 s
+降到 8 MiB forward / 2 MiB back / 30 s，实测 mpv PSS 从约 61.4 MiB 降到
+56.4 MiB。歌单元数据缓存限制为 8 项、每项 20,000 首，避免浏览超大歌单导致
+内存无界增长。pigma 源码对比记录在 `docs/upstream-parity.md`。
 
 ## 5. 登录重构与真实账号验收
 

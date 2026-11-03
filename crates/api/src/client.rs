@@ -27,6 +27,9 @@ const EAPI_HOST: &str = "https://interfacepc.music.163.com";
 const WEAPI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
 const EAPI_UA: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
 const MAX_SONG_DETAIL_CHUNK: usize = 500;
+const PLAYLIST_CACHE_TTL: Duration = Duration::from_secs(300);
+const MAX_CACHED_PLAYLISTS: usize = 8;
+const MAX_CACHED_PLAYLIST_TRACKS: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CryptoMode {
@@ -126,6 +129,15 @@ impl NeteaseClient {
 
     pub fn endpoints(&self) -> &Endpoints {
         &self.endpoints
+    }
+
+    /// Current MUSIC_U value, used only to detect a forced account switch.
+    pub async fn current_music_u(&self) -> Option<String> {
+        self.session
+            .read()
+            .await
+            .cookie("MUSIC_U")
+            .map(str::to_owned)
     }
 
     pub async fn auth_state(&self) -> AuthState {
@@ -483,7 +495,7 @@ impl NeteaseClient {
         let cache = self.playlist_cache.read().await;
         cache
             .get(&id)
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(300))
+            .filter(|(at, _)| at.elapsed() < PLAYLIST_CACHE_TTL)
             .map(|(_, p)| p.clone())
     }
 
@@ -506,10 +518,30 @@ impl NeteaseClient {
         let playlist = response
             .playlist
             .ok_or_else(|| ApiError::NotFound(format!("playlist {id}")))?;
-        self.playlist_cache
-            .write()
-            .await
-            .insert(id, (Instant::now(), playlist.clone()));
+        if playlist
+            .track_ids
+            .len()
+            .saturating_add(playlist.tracks.len())
+            <= MAX_CACHED_PLAYLIST_TRACKS
+        {
+            let mut cache = self.playlist_cache.write().await;
+            cache.retain(|_, (at, cached)| {
+                at.elapsed() < PLAYLIST_CACHE_TTL
+                    && cached.track_ids.len().saturating_add(cached.tracks.len())
+                        <= MAX_CACHED_PLAYLIST_TRACKS
+            });
+            while cache.len() >= MAX_CACHED_PLAYLISTS {
+                let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(id, _)| *id)
+                else {
+                    break;
+                };
+                cache.remove(&oldest);
+            }
+            cache.insert(id, (Instant::now(), playlist.clone()));
+        }
         Ok(playlist)
     }
 

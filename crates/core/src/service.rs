@@ -496,8 +496,18 @@ impl Daemon {
                 });
                 Ok(CommandResult::ack_msg("Shutting down"))
             }
-            Command::ImportBrowserCookie => {
+            Command::ImportBrowserCookie { force } => {
                 let cookie = browser_login::firefox_cookie_header()?;
+                if force {
+                    let new_music_u = browser_login::music_u_from_header(&cookie);
+                    if let (Some(current), Some(new)) =
+                        (self.inner.api.current_music_u().await, new_music_u)
+                    {
+                        if current == new {
+                            return Err(BrowserLoginError::SameAccount.into());
+                        }
+                    }
+                }
                 self.inner.api.import_cookie(&cookie).await?;
                 self.sync_auth().await;
                 Ok(CommandResult::Auth(self.auth().await))

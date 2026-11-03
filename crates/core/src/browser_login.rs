@@ -3,17 +3,16 @@
 //!
 //! Cookies are secrets: this module never logs values, copies the database to
 //! a private temporary directory, queries only the NetEase cookie names it
-//! needs, and removes the copy before returning.
+//! needs, and removes the copy before returning. The query is executed by the
+//! system `sqlite3` binary so the daemon does not link a SQLite engine.
 
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::process::Command;
 
-use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
-
 use yoruplay_protocol::LOGIN_URL;
 
 const COOKIE_NAMES: &[&str] = &[
@@ -33,6 +32,8 @@ pub enum BrowserLoginError {
     NoProfile,
     #[error("Firefox has no valid MUSIC_U cookie; log in at {LOGIN_URL}")]
     NoCookie,
+    #[error("Firefox is still logged in as the current account; switch accounts there")]
+    SameAccount,
     #[error("could not read Firefox cookies: {0}")]
     Io(String),
     #[error("could not query Firefox cookies: {0}")]
@@ -44,6 +45,7 @@ impl BrowserLoginError {
         match self {
             Self::NoProfile => "browser_profile_missing",
             Self::NoCookie => "browser_cookie_missing",
+            Self::SameAccount => "browser_same_account",
             Self::Io(_) => "browser_cookie_io",
             Self::Sqlite(_) => "browser_cookie_sqlite",
         }
@@ -58,7 +60,10 @@ impl BrowserLoginError {
             Self::NoCookie => {
                 Some("Finish logging in at https://music.163.com/login in Firefox, then retry.")
             }
-            _ => Some("Check Firefox profile permissions and retry, or use --cookie-stdin."),
+            _ => Some(
+                "Install the `sqlite` package, check Firefox profile permissions, \
+                 or use --cookie-stdin.",
+            ),
         }
     }
 }
@@ -99,7 +104,7 @@ fn firefox_cookie_databases() -> Vec<PathBuf> {
     found.sort_by_key(|path| {
         fs::metadata(path)
             .and_then(|meta| meta.modified())
-            .unwrap_or(UNIX_EPOCH)
+            .unwrap_or(std::time::UNIX_EPOCH)
     });
     found.reverse();
     found
@@ -139,115 +144,86 @@ fn read_profile(database: &Path) -> Result<Option<String>, BrowserLoginError> {
             fs::copy(&sidecar, &destination).map_err(|e| BrowserLoginError::Io(e.to_string()))?;
         }
     }
-    let connection = Connection::open_with_flags(
-        &copy,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| BrowserLoginError::Sqlite(e.to_string()))?;
-    connection
-        .busy_timeout(Duration::from_secs(2))
-        .map_err(|e| BrowserLoginError::Sqlite(e.to_string()))?;
 
-    let placeholders = COOKIE_NAMES
+    let names = COOKIE_NAMES
         .iter()
-        .map(|_| "?")
+        .map(|name| format!("'{name}'"))
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!(
+    let query = format!(
         "SELECT name, value FROM moz_cookies \
          WHERE host IN ('music.163.com', '.music.163.com') \
-         AND path='/' AND name IN ({placeholders}) \
+         AND path='/' AND name IN ({names}) \
          ORDER BY CASE host WHEN '.music.163.com' THEN 0 ELSE 1 END"
     );
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|e| BrowserLoginError::Sqlite(e.to_string()))?;
-    let rows = statement
-        .query_map(rusqlite::params_from_iter(COOKIE_NAMES.iter()), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|e| BrowserLoginError::Sqlite(e.to_string()))?;
+    let output = Command::new("sqlite3")
+        .arg("-readonly")
+        .arg("-separator")
+        .arg("\u{1f}")
+        .arg(&copy)
+        .arg(query)
+        .output()
+        .map_err(|e| BrowserLoginError::Io(format!("run sqlite3: {e}")))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        return Err(BrowserLoginError::Sqlite(message.trim().to_string()));
+    }
+    Ok(parse_cookie_output(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+pub fn music_u_from_header(header: &str) -> Option<&str> {
+    header.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix("MUSIC_U=")
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn parse_cookie_output(output: &str) -> Option<String> {
     let mut cookies = HashMap::new();
-    for row in rows {
-        let (name, value) = row.map_err(|e| BrowserLoginError::Sqlite(e.to_string()))?;
+    for line in output.lines() {
+        let Some((name, value)) = line.split_once('\u{1f}') else {
+            continue;
+        };
         if !value.is_empty() && !value.contains([';', '\n', '\r']) {
             cookies.entry(name).or_insert(value);
         }
     }
     if !cookies.contains_key("MUSIC_U") {
-        return Ok(None);
+        return None;
     }
-    let header = COOKIE_NAMES
-        .iter()
-        .filter_map(|name| cookies.get(*name).map(|value| format!("{name}={value}")))
-        .collect::<Vec<_>>()
-        .join("; ");
-    Ok(Some(header))
+    Some(
+        COOKIE_NAMES
+            .iter()
+            .filter_map(|name| cookies.get(*name).map(|value| format!("{name}={value}")))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fake_database() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cookies.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT, path TEXT, expiry INTEGER);",
-            )
-            .unwrap();
-        (dir, path)
-    }
-
     #[test]
-    fn reads_only_net_ease_cookies() {
-        let (_dir, path) = fake_database();
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO moz_cookies VALUES ('.music.163.com','MUSIC_U','abc','/',0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO moz_cookies VALUES ('.music.163.com','__csrf','csrf','/',0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO moz_cookies VALUES ('.example.com','MUSIC_U','other','/',0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO moz_cookies VALUES ('.music.163.com','session','secret','/other',0)",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-        let header = read_profile(&path).unwrap().unwrap();
+    fn parses_music_u_and_csrf() {
+        let header =
+            parse_cookie_output("MUSIC_U\u{1f}abc\n__csrf\u{1f}csrf\nsession\u{1f}secret\n")
+                .unwrap();
         assert!(header.contains("MUSIC_U=abc"));
         assert!(header.contains("__csrf=csrf"));
-        assert!(!header.contains("other"));
-        assert!(!header.contains("secret"));
+        assert!(!header.contains("session=secret"));
     }
 
     #[test]
     fn missing_music_u_is_not_a_login() {
-        let (_dir, path) = fake_database();
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO moz_cookies VALUES ('.music.163.com','__csrf','csrf','/',0)",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-        assert!(read_profile(&path).unwrap().is_none());
+        assert!(parse_cookie_output("__csrf\u{1f}csrf\n").is_none());
+    }
+
+    #[test]
+    fn rejects_cookie_values_with_separators() {
+        assert!(parse_cookie_output("MUSIC_U\u{1f}a;b\n").is_none());
     }
 }
