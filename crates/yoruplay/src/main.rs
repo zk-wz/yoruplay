@@ -603,9 +603,8 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
     } else {
         println!("Opening {LOGIN_URL} in your browser.");
         open_login_page();
-        println!(
-            "Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...\n             Other browsers are not supported yet; use --cookie-stdin for those."
-        );
+        println!("Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...");
+        println!("Other browsers are not supported yet; use --cookie-stdin for those.");
         for _ in 0..150 {
             match client.request(Command::ImportBrowserCookie).await {
                 Ok(result) => {
