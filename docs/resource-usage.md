@@ -13,7 +13,7 @@ pages, so the total is a useful approximation, not a naive RSS sum.
 | Scenario | Daemon PSS / RSS | TUI PSS / RSS | Threads (daemon/TUI) | Total PSS | Notes |
 |---|---:|---:|---:|---:|---|
 | Daemon idle, no mpv | **6.7 MiB** / 9.9 MiB | — | 9 / — | ≈ 7 MiB | Earlier anonymous, empty queue; retained as historical baseline |
-| Daemon idle, logged-in account + restored 10-track queue | **10.3–10.8 MiB** / 13.6–14.1 MiB | — | 10 / — | ≈ 11 MiB | Current service state; no mpv |
+| Daemon idle, logged-in account + restored 10-track queue | **10.3–10.8 MiB** / 13.6–14.1 MiB | — | 10 / — | ≈ 11 MiB | Current daemon state; no mpv |
 | Daemon + TUI open | 7.0 MiB / 14 MiB | **3.2 MiB** / 9.2 MiB | 10 / 10 | **≈ 10 MiB** | 120×36 terminal, login overlay dismissed |
 | 200-track public playlist loaded | **19.7 MiB** / 22.5 MiB | — | 10 / — | ≈ 20 MiB | 热歌榜, full song details; allocator retains memory |
 | Search (50 results) | **18.6 MiB** / 21.3 MiB | — | 10 / — | ≈ 19 MiB | |
@@ -21,7 +21,7 @@ pages, so the total is a useful approximation, not a naive RSS sum.
 
 Idle CPU: 0.0–0.3% of one core. No mpv process is started until playback.
 
-## Playback (release, systemd user service)
+## Playback (release)
 
 Measured while playing a real NetEase stream through mpv/PipeWire:
 
@@ -43,8 +43,8 @@ mpv's cache is now 8 MiB forward / 2 MiB back / 30 s, down from the earlier
 20,000 tracks per entry, so browsing very large playlists cannot grow the daemon
 without limit.
 
-`systemd` `MemoryCurrent` was ≈94 MiB during playback; that includes page cache
-and cgroup accounting, while the PSS sum is ≈66 MiB.
+There is no systemd cgroup memory accounting now; the PSS sum is the measured
+figure. Page cache is excluded from PSS.
 
 ## Functional checks performed
 

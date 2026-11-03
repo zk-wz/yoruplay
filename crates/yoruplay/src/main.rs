@@ -34,7 +34,7 @@ struct Cli {
 enum CliCommand {
     /// Open the terminal interface (default).
     Tui,
-    /// Run the background service in the foreground.
+    /// Run the daemon in the foreground.
     Daemon,
     /// Stop the background daemon and save playback state.
     #[command(alias = "quit")]
@@ -122,12 +122,14 @@ enum CliCommand {
     },
     /// Check mpv, PipeWire, the daemon, MPRIS and file permissions.
     Doctor,
-    /// Print log locations and follow commands.
+    /// Print log file locations and tail commands.
     Logs,
-    /// Remove service, cache and runtime state (never credentials/config).
+    /// Remove cache and runtime state (never credentials/config).
     Uninstall {
+        /// Confirm removal without prompting.
         #[arg(long)]
         yes: bool,
+        /// Also delete the installed executable when it is under HOME.
         #[arg(long)]
         remove_binary: bool,
     },
@@ -391,11 +393,7 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
         CliCommand::Cache { command } => cache_command(command, &paths, &config).await,
         CliCommand::Doctor => doctor(&paths, &config).await,
         CliCommand::Logs => {
-            println!("Daemon logs: journalctl --user -u yoruplay -f");
-            println!(
-                "Auto-started daemon log: tail -f {}",
-                paths.log_file().display()
-            );
+            println!("Daemon log: tail -f {}", paths.log_file().display());
             println!("TUI log: tail -f {}", paths.tui_log_file().display());
             Ok(())
         }
@@ -766,7 +764,7 @@ async fn doctor(paths: &Paths, config: &Config) -> Result<()> {
 async fn uninstall(paths: &Paths, config: &Config, yes: bool, remove_binary: bool) -> Result<()> {
     if !yes {
         bail!(
-            "Refusing to remove service/cache/runtime state without --yes.\n\
+            "Refusing to remove cache/runtime state without --yes.\n\
              Credentials and config are never removed by this command."
         );
     }

@@ -73,9 +73,7 @@ impl ServiceError {
                     MpvError::Missing => {
                         Some("Install mpv with `sudo pacman -S mpv`, then retry.".into())
                     }
-                    _ => Some(
-                        "Run `yoruplay doctor` and check `journalctl --user -u yoruplay`.".into(),
-                    ),
+                    _ => Some("Run `yoruplay doctor` and check `yoruplay logs`.".into()),
                 };
                 (e.user_message(), hint)
             }

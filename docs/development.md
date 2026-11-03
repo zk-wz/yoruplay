@@ -10,7 +10,6 @@ crates/core      queue, mpv, daemon server, MPRIS, persistence, cache
 crates/tui       Ratatui application
 crates/yoruplay  CLI binary
 docs/            architecture, upstream map, known issues, resource report
-systemd/         reference user unit
 ```
 
 ## Checks

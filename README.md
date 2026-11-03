@@ -3,7 +3,7 @@
 A lightweight Rust terminal music player for NetEase Cloud Music.
 
 YoruPlay has three independent surfaces over one authoritative background
-service:
+daemon:
 
 - **TUI** (Ratatui + Crossterm) for browsing and selecting music.
 - **CLI** for scripting and day-to-day control.
@@ -31,7 +31,7 @@ the same daemon and queue.
   position in microseconds, seek, volume, loop/shuffle mapping and plain-text
   lyrics in `xesam:asText`.
 - Bounded on-disk cache, atomic state persistence, protected Unix socket,
-  single-instance daemon, systemd user unit (not enabled by default).
+  single-instance daemon, protected IPC socket, graceful shutdown.
 - English/Chinese UI labels (`ui.language = "en" | "zh"`).
 
 ## Requirements
@@ -153,7 +153,7 @@ yoruplay
 ```
 
 The TUI auto-starts a daemon if one is not already running. It auto-connects to
-an existing service. Closing the TUI (`q`) does not stop playback.
+an existing daemon. Closing the TUI (`q`) does not stop playback.
 
 Common keys:
 
@@ -278,13 +278,8 @@ moved aside as `state.json.corrupt-<timestamp>` so the daemon can still start.
 
 ## Logs
 
-With the systemd service:
-
-```sh
-journalctl --user -u yoruplay -f
-```
-
-When the TUI auto-started the daemon:
+The daemon logs to `~/.cache/yoruplay/yoruplay.log` when started by the TUI/CLI.
+A foreground `yoruplay daemon` logs to stderr:
 
 ```sh
 tail -f ~/.cache/yoruplay/yoruplay.log
