@@ -77,3 +77,8 @@ fingerprint. The imported browser cookie supplies the web `sDeviceId` and
 - QR login, password login and captcha flows.
 - pigma's `MUSIC_U || __csrf` logged-in heuristic; YoruPlay requires `MUSIC_U`.
 - pigma's request-level CSRF query duplication; the payload form works.
+
+## Detailed playback analysis
+
+See [`pigma-playback-analysis.md`](pigma-playback-analysis.md) for the decoder
+stack, NetEase compatibility matrix and memory trade-offs.
