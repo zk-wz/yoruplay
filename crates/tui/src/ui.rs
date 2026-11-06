@@ -88,10 +88,16 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::Yellow),
         ));
     }
-    if app.playback.mpv_available {
-        spans.push(Span::styled("  mpv", Style::default().fg(Color::DarkGray)));
+    if app.playback.audio_available {
+        spans.push(Span::styled(
+            "  Rust audio",
+            Style::default().fg(Color::DarkGray),
+        ));
     } else {
-        spans.push(Span::styled("  mpv?", Style::default().fg(Color::Red)));
+        spans.push(Span::styled(
+            "  audio?",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -362,7 +368,11 @@ fn song_lines(
     visible: usize,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let _ = origin;
+    let offset = app
+        .playlist_page
+        .filter(|page| matches!(origin, SongsOrigin::Playlist(id) if id == page.id))
+        .map(|page| page.offset)
+        .unwrap_or(0);
     if view.songs.is_empty() {
         return vec![Line::raw(tr(app.lang, "No songs.", "暂无歌曲。"))];
     }
@@ -377,7 +387,7 @@ fn song_lines(
                 let text = format!(
                     "{} {:>3}  {} — {}",
                     marker,
-                    i + 1,
+                    offset + i + 1,
                     song.name,
                     song.artist_text()
                 );
@@ -533,6 +543,7 @@ fn queue_lines(app: &App, selected: usize, visible: usize, width: u16) -> Vec<Li
             .iter()
             .enumerate()
             .map(|(i, item)| {
+                let i = i + app.queue.offset;
                 let marker = if current == Some(i) { "▶" } else { " " };
                 (
                     format!(
@@ -550,7 +561,7 @@ fn queue_lines(app: &App, selected: usize, visible: usize, width: u16) -> Vec<Li
                 )
             })
             .collect(),
-        selected,
+        selected.saturating_sub(app.queue.offset),
         visible,
         width,
     )

@@ -6,13 +6,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
@@ -22,6 +22,40 @@ use yoruplay_protocol::{
 };
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<CommandResult, ErrorInfo>>>>>;
+
+struct PendingRequest {
+    id: u64,
+    pending: Pending,
+    tx: mpsc::Sender<ClientMessage>,
+    enqueued: bool,
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        let removed = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id)
+            .is_some();
+        if removed && self.enqueued {
+            match self.tx.try_send(ClientMessage::Cancel { id: self.id }) {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(cancel)) => {
+                    // Only queued requests need cancellation. With bounded request
+                    // admission and FIFO senders, these small waiters cannot
+                    // accumulate beyond the queued/in-flight request population.
+                    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                        let tx = self.tx.clone();
+                        runtime.spawn(async move {
+                            let _ = tx.send(cancel).await;
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -200,6 +234,8 @@ pub struct IpcClient {
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
     daemon_version: String,
+    requests: Arc<Semaphore>,
+    urgent_requests: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for IpcClient {
@@ -225,9 +261,9 @@ impl IpcClient {
             .map_err(|_| IpcError::Connect("connection timed out".into()))?
             .map_err(|e| IpcError::Connect(e.to_string()))?;
         let (read_half, write_half) = stream.into_split();
-        let (tx, write_rx) = mpsc::channel::<ClientMessage>(64);
+        let (tx, write_rx) = mpsc::channel::<ClientMessage>(8);
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let (events, _) = broadcast::channel(512);
+        let (events, _) = broadcast::channel(32);
         let (hello_tx, hello_rx) = oneshot::channel::<u32>();
         let reader_task = {
             let pending = pending.clone();
@@ -250,7 +286,11 @@ impl IpcClient {
                             }
                         }
                         ServerMessage::Response { id, result, error } => {
-                            if let Some(sender) = pending.lock().await.remove(&id) {
+                            if let Some(sender) = pending
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&id)
+                            {
                                 let outcome = match (result, error) {
                                     (Some(result), _) => Ok(result),
                                     (None, Some(error)) => Err(error),
@@ -267,14 +307,14 @@ impl IpcClient {
                         }
                     }
                 }
-                let mut pending = pending.lock().await;
+                let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
                 for (_, sender) in pending.drain() {
                     let _ = sender.send(Err(ErrorInfo::new(
                         "daemon_disconnected",
                         "The daemon connection closed.",
                     )));
                 }
-                let _ = tx.send(ClientMessage::Hello { version: 0 }).await;
+                let _ = tx.try_send(ClientMessage::Hello { version: 0 });
             })
         };
         let writer_task = tokio::spawn(async move {
@@ -331,6 +371,8 @@ impl IpcClient {
             reader_task,
             writer_task,
             daemon_version: format!("protocol-v{daemon_version}"),
+            requests: Arc::new(Semaphore::new(4)),
+            urgent_requests: Arc::new(Semaphore::new(2)),
         };
         Ok(client)
     }
@@ -344,24 +386,43 @@ impl IpcClient {
     }
 
     pub async fn request(&self, command: Command) -> Result<CommandResult, ErrorInfo> {
+        let admission = if matches!(&command, Command::Stop | Command::Next) {
+            &self.urgent_requests
+        } else {
+            &self.requests
+        };
+        let _permit = admission.clone().try_acquire_owned().map_err(|_| {
+            ErrorInfo::new(
+                "busy",
+                "Too many pending requests; wait for the current operation.",
+            )
+        })?;
+        let upgrade = matches!(command, Command::UpgradeAudio { .. });
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        if self
-            .tx
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, tx);
+        let mut _pending = PendingRequest {
+            id,
+            pending: self.pending.clone(),
+            tx: self.tx.clone(),
+            enqueued: false,
+        };
+        self.tx
             .send(ClientMessage::Request { id, command })
             .await
-            .is_err()
-        {
-            self.pending.lock().await.remove(&id);
-            return Err(IpcError::Closed.to_error_info());
-        }
-        match timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(IpcError::Closed.to_error_info()),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(IpcError::Timeout.to_error_info())
+            .map_err(|_| IpcError::Closed.to_error_info())?;
+        _pending.enqueued = true;
+        if upgrade {
+            rx.await
+                .unwrap_or_else(|_| Err(IpcError::Closed.to_error_info()))
+        } else {
+            match timeout(REQUEST_TIMEOUT, rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(IpcError::Closed.to_error_info()),
+                Err(_) => Err(IpcError::Timeout.to_error_info()),
             }
         }
     }

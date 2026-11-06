@@ -30,7 +30,7 @@ async fn run_impl(paths: Paths, config: Config) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e.to_error_info().message))?,
     );
     let mut daemon_events = client.subscribe();
-    let (response_tx, mut response_rx) = mpsc::channel::<UiResponse>(64);
+    let (response_tx, mut response_rx) = mpsc::channel::<UiResponse>(8);
     let mut app = App::new(client.clone(), response_tx, config.ui.language);
     app.initial_load();
 

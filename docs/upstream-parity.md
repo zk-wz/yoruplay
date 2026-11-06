@@ -9,15 +9,16 @@ login and request risk; it is not a feature-parity checklist.
 
 | | YoruPlay | pigma |
 |---|---|---|
-| Playback | external `mpv` over JSON IPC | embedded `rodio` + Symphonia |
+| Playback | Symphonia worker + bounded PCM ring + rodio/cpal | embedded `rodio` + Symphonia |
 | Process model | daemon + TUI/CLI/MPRIS clients | TUI or `-d` headless process |
-| Cache policy | no audio cache; 32 MiB metadata cache | runtime audio/content/cover disk-cache **budget** of 2 GiB (a cap, not preallocated; pigma source itself is only a few MiB) |
+| Cache policy | playback-acquired native audio, 10 GiB FIFO; separate 32 MiB metadata cache | runtime audio/content/cover disk-cache **budget** of 2 GiB (not preallocated) |
 | Login | official web page + Firefox cookie | QR code or password/captcha in `ncm-api` |
 | Persistent session | `auth.json` 0600 | `cookies.json` |
 
-pigma's embedded decoder avoids an mpv child but keeps image/cover rendering,
-an equalizer, download cache and content pages in the same process. YoruPlay's
-TUI is virtualized and does not decode covers; mpv is a separate process.
+Both players now embed decoding. YoruPlay keeps its authoritative background
+daemon, paged TUI/CLI clients and MPRIS, but does not copy pigma's cover rendering,
+equalizer, WSOLA or fallback download machinery. Cache and playback share one
+demand-driven transfer rather than an independent downloader.
 
 ## Login
 
@@ -59,10 +60,10 @@ fingerprint. The imported browser cookie supplies the web `sDeviceId` and
 
 ## Resource expectations
 
-- Idle daemon: about 10 MiB PSS with a restored account/queue; the earlier
-  6.7 MiB measurement was an empty, anonymous state.
-- Playback: mpv about 56 MiB PSS after reducing its cache to 8 MiB forward /
-  2 MiB back / 30 s; daemon about 11 MiB. Total around 67 MiB.
+- Pre-cutover historical baseline: roughly 11 MiB daemon + 56 MiB mpv, about
+  67 MiB PSS during playback. These are not current Rust-backend measurements.
+- Current measured release scenarios are in [resource-usage.md](resource-usage.md);
+  a library/language choice alone is not evidence of resource savings.
 - pigma has a much larger default **disk-cache budget** (2 GiB, not allocated
   up front) and keeps cover/image/decoder state in the same process. A direct
   pigma PSS measurement is not part of the YoruPlay test suite; do not claim a
@@ -73,7 +74,8 @@ fingerprint. The imported browser cookie supplies the web `sDeviceId` and
 
 ## What YoruPlay does not copy
 
-- pigma's random UA, embedded decoder and 2 GiB disk-cache budget.
+- pigma's random UA, eager downloader or 2 GiB disk-cache policy. The decoder
+  separation is reused with YoruPlay's own ownership/backpressure constraints.
 - QR login, password login and captcha flows.
 - pigma's `MUSIC_U || __csrf` logged-in heuristic; YoruPlay requires `MUSIC_U`.
 - pigma's request-level CSRF query duplication; the payload form works.

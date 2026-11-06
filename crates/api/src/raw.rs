@@ -192,6 +192,40 @@ pub struct RawPlaylist {
 }
 
 impl RawPlaylist {
+    pub fn summary(&self) -> PlaylistSummary {
+        PlaylistSummary {
+            id: self.id,
+            name: if self.name.is_empty() {
+                format!("Playlist {}", self.id)
+            } else {
+                self.name.clone()
+            },
+            cover_url: self.cover_img_url.clone(),
+            track_count: if self.track_count > 0 {
+                self.track_count
+            } else if !self.track_ids.is_empty() {
+                self.track_ids.len() as u64
+            } else {
+                self.tracks.len() as u64
+            },
+            subscribed: self.subscribed.unwrap_or(false),
+            creator_id: self
+                .creator
+                .as_ref()
+                .map(|c| c.user_id)
+                .unwrap_or(self.user_id),
+            creator_name: self
+                .creator
+                .as_ref()
+                .map(|c| c.nickname.clone())
+                .unwrap_or_default(),
+            special_type: self.special_type,
+            description: self.description.clone(),
+            play_count: self.play_count,
+            update_time_ms: self.update_time,
+        }
+    }
+
     pub fn into_summary(self) -> PlaylistSummary {
         let creator_id = self
             .creator
@@ -414,6 +448,8 @@ pub struct RawStreamUrl {
     pub br: u64,
     #[serde(default)]
     pub size: u64,
+    #[serde(default)]
+    pub md5: Option<String>,
     #[serde(default)]
     pub code: i64,
     #[serde(default)]

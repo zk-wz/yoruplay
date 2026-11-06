@@ -1,8 +1,7 @@
 //! MPRIS 2.2 implementation over zbus.
 //!
-//! YoruPlay's daemon is the only MPRIS owner; mpv is deliberately not allowed
-//! to register a second player. The daemon state is the source of truth for
-//! every method and property here.
+//! YoruPlay's daemon is the only MPRIS owner and the source of truth for every
+//! method and property here.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -415,6 +414,7 @@ struct Snapshot {
     track_id: Option<u64>,
     duration_ms: u64,
     lyrics: Option<String>,
+    artwork: Option<String>,
 }
 
 impl Snapshot {
@@ -432,6 +432,10 @@ impl Snapshot {
             track_id: playback.current.as_ref().map(|s| s.id),
             duration_ms: playback.duration_ms,
             lyrics: lyrics.map(str::to_string),
+            artwork: playback
+                .current
+                .as_ref()
+                .and_then(|song| song.cover_url.clone()),
         }
     }
 }
@@ -471,7 +475,7 @@ async fn watch_properties(connection: Connection, daemon: Daemon) -> zbus::Resul
                 .await?;
                 previous = current;
             }
-            Ok(yoruplay_protocol::Event::Queue(_)) => {
+            Ok(yoruplay_protocol::Event::QueueChanged { .. }) => {
                 let playback = daemon.playback().await;
                 let lyrics = daemon.lyrics().await;
                 let current = Snapshot::from(&playback, lyrics.as_deref());
@@ -548,6 +552,7 @@ async fn emit_changes(
     if previous.track_id != current.track_id
         || previous.duration_ms != current.duration_ms
         || previous.lyrics != current.lyrics
+        || previous.artwork != current.artwork
     {
         let metadata = metadata_for(song, lyrics, Some(current.duration_ms));
         if let Ok(value) = OwnedValue::try_from(Value::from(metadata)) {
@@ -617,7 +622,9 @@ mod tests {
             queue_len: 2,
             error: None,
             warning: None,
-            mpv_available: true,
+            audio_available: true,
+            audio_source: None,
+            actual_quality: None,
             url_refreshed_at_ms: None,
         };
         assert!(!can_next(&playback));

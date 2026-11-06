@@ -40,19 +40,40 @@
 - **Lyrics**: no scrolling lyric view is implemented (by design). MPRIS exposes
   timestamp-stripped `xesam:asText` when available; Noctalia may choose not to
   display it.
-- **Audio device changes**: mpv/PipeWire follows the default sink. A Bluetooth
-  disconnect can cause an mpv stream error; YoruPlay retries the URL once and
-  shows an error if audio still fails. Device switching is not explicitly
-  orchestrated.
-- **mpv cache**: reduced to 16 MiB forward / 4 MiB back / 60 s to meet the
-  memory target. Very unstable networks may prefer a larger cache; this is
-  currently a compiled default, not a config option.
-- **Sleep/wake and network changes**: no background network poller. A stale
-  stream is refreshed on resume/error; the next user action retries API calls.
-- **Trial streams**: when the account can only play a preview, the daemon
-  reports a trial warning but cannot extend it.
-- **No local audio cache**: YoruPlay does not persist audio files; stream URL
-  expiry is handled by refresh.
+- **Audio routes**: output uses cpal's system ALSA devices. Install `pipewire-alsa`
+  or a PulseAudio ALSA plugin; a native Pulse socket alone does not create an ALSA
+  device named `pulse`. Empty `playback.audio_device` prefers shared routes.
+  Explicit missing devices fail rather than silently taking exclusive hardware.
+- **Device/network transitions**: API/CDN/device recovery shares a configurable
+  retry budget (three retries, ten seconds apart by default). Local device
+  recovery reuses the original local inode without network. Real Bluetooth
+  unplug/replug, suspend/resume and a live 20-minute URL expiry are not verified.
+- **Format coverage**: MP3, FLAC, M4A/AAC, common ADTS AAC, Ogg/Vorbis and WAV/PCM
+  are supported; this is not mpv's full codec catalogue. Symphonia 0.5.5 ADTS
+  supports common MPEG-4/no-CRC `fff1`, not every MPEG-2/CRC/multiple-block variant.
+  No Opus, ALAC, NCM or DRM/decryption fallback is included.
+- **Embedded tags**: Ogg retains its native audio bitstream without rewriting
+  embedded comments; local lyrics/artwork remain in the managed index/files.
+  Tag-write failures in other containers also preserve verified audio rather
+  than discard it. Cache playback does not fetch missing metadata online.
+- **Trial streams**: `freeTrialInfo` URLs are skipped before the media GET, even
+  in repeat modes. They are not extended, cached or played as previews.
+- **Local-only boundary**: no online lyrics/artwork or automatic FM/Heartbeat
+  refill during cached playback. Missing local metadata remains missing; an
+  exhausted local queue stops. Explicit online browsing/upgrades are still online.
+- **Cache filesystem**: Linux `O_TMPFILE` and unprivileged link publication are
+  required. Unsupported filesystems fail explicitly; no named partial fallback.
+  Avoid tmpfs/ramfs: anonymous downloaded bytes still consume RAM there.
+- **Quota and pins**: reducing the limit can remain over budget while the current
+  inode is pinned. Accounting reports this and trims on release. Explicit clear
+  unlinks preferred entries without interrupting an already open reader.
+- **Quality upgrade**: a lower requested tier or a server fallback cannot replace
+  a superior cached entry. Missing/unrecognized actual quality is not guessed.
+  No live lossless/hi-res entitlement was available in the checked account;
+  FLAC/AAC format playback was verified with generated fixtures.
+- **Platform limits**: at most 32 decoded channels, 64 MiB PCM ring and a bounded
+  decoded packet. Large user-selected buffers/high-rate multichannel content can
+  exceed those limits and report an error instead of allocating without bound.
 - **Private/cloud upload edge cases**: account-specific restricted tracks may
   return no playable URL; this is surfaced as an unplayable-track error.
 - **God-mode/other clients**: YoruPlay does not implement recent upstream

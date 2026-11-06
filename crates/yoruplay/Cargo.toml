@@ -16,8 +16,10 @@ tempfile = "3"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+fs2.workspace = true
 libc = "0.2"
 serde_json.workspace = true
+serde.workspace = true
 termtree.workspace = true
 tokio.workspace = true
 tracing.workspace = true

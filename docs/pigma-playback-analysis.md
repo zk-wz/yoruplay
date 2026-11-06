@@ -2,8 +2,9 @@
 
 Source-only investigation of `upstream/pigma`, focused on playback, decoding,
 NetEase compatibility and memory trade-offs. No pigma build or runtime
-measurement was performed. This is a reference for a possible future YoruPlay
-playback refactor; it is not an implementation plan.
+measurement was performed. The implemented YoruPlay cutover is documented in
+[Rust playback and audio-cache design](song-cache.md); its own measurements are
+in [resource-usage.md](resource-usage.md), not inferred from pigma.
 
 ## Conclusion
 
@@ -41,14 +42,19 @@ rodio = { version = "0.22.2", default-features = false, features = [
 ] }
 ```
 
-So the guaranteed set is:
+The combined container/codec feature set covers AAC, FLAC, MP4/M4A and MP3.
+This is source-level capability analysis, not a runtime verification.
 
-- AAC
-- FLAC
-- MP4/M4A container
-- MP3
-- Vorbis/Ogg
-- WAV
+Two earlier conclusions need correction:
+
+- `symphonia-vorbis` enables the codec, but pigma does not enable
+  `symphonia-ogg`; ordinary Ogg/Vorbis demuxing is not established.
+- `symphonia-wav` enables the container, but pigma does not enable
+  `symphonia-pcm`; ordinary PCM WAV playback is not established.
+
+Rodio's complete convenience features pair `vorbis` with both codec and Ogg
+demuxer, and `wav` with WAV demuxer and PCM codec. See its
+[0.22.2 feature definitions](https://crates.io/api/v1/crates/rodio/0.22.2).
 
 Not enabled by these features:
 
@@ -154,7 +160,7 @@ sniffs the content, but this is not a guarantee for every container.
 | lossless / hires | Yes | FLAC |
 | ordinary MP3 320 kbps | Yes | |
 | AAC / M4A | Yes | AAC + isomp4 |
-| Vorbis / WAV | Yes | Rare for NetEase streams |
+| Vorbis / PCM WAV | Not established | Missing Ogg demuxer / PCM codec features; earlier “Yes” was incorrect |
 | local/free file | Yes | Opened as a file and decoded |
 | HTTP range/seek | Usually | Depends on CDN Range support; mpv is more tolerant |
 | 30-second trial stream | No/limited | `free_trial` URLs are filtered out; pigma looks for a full URL instead |
@@ -187,21 +193,49 @@ pigma's embedded design:
 - No pigma PSS was measured, so no claim is made that pigma uses less memory
   than mpv in total.
 
-## Possible directions if YoruPlay ever changes playback
+## Selected YoruPlay direction
 
-These are options, not commitments:
+The [implementation plan](song-cache.md) now selects a complete mpv removal:
+one Rust playback backend, with playback and persistent cache consuming the same
+disk-backed transfer. It supersedes the earlier independent cache downloader.
+There will be no retained mpv compatibility backend.
 
-1. Keep mpv, reduce cache further (for example 4 MiB forward / 1 MiB back) and
-   measure under the same playback scenarios. The current 8/2 setting is a
-   conservative balance.
-2. Keep mpv and borrow hygiene ideas such as `malloc_trim` after large API
-   response/cover handling, if profiling shows retained heap.
-3. Replace mpv with rodio/Symphonia only if full control of seek, device
-   switching, EQ, speed and cache is implemented. This is a major rewrite, and
-   it would reduce codec compatibility unless extra Symphonia features are
-   added. It is not justified by memory alone.
-4. Keep mpv as the compatibility floor for unusual NetEase qualities; an
-   embedded decoder would be a second backend, increasing complexity.
+### Dependency and behavior constraints
+
+- rodio 0.22.2 declares Rust 1.87; stream-download 0.24.4 declares Rust 1.91.
+  YoruPlay currently declares 1.85. Do not copy pigma's dependency versions
+  without an explicit MSRV change and resolved dependency verification.
+- pigma's `source.rs:147-153` calls `mark_cached` on the first progress callback,
+  not guarded by `StreamPhase::Complete`. Its own completion comment is not the
+  implemented invariant.
+- `cache/audio.rs:297-302` creates/truncates the final filename directly. This
+  cannot provide complete-only publication or preserve an older entry on failure.
+- `player.rs:270-296` passes a blocking-reader Decoder into the output Source.
+  Its `SharedReader` lock spans network-dependent reads (`player.rs:67-71`).
+  YoruPlay must put decoding/IO behind its own bounded PCM handoff.
+- The nonpersistent path uses `TempStorageProvider::default()` (`source.rs:224`).
+  A default OS temporary directory can be tmpfs; YoruPlay must explicitly use
+  its disk-backed configured filesystem instead.
+
+
+Borrow pigma's source/storage/decoder separation, not all of its policies:
+
+- Network reads must follow playback demand with bounded read-ahead, not continue
+  as a background whole-track download after skip or pause.
+- Complete byte-range coverage is required; EOF after seek does not prove a
+  complete offline file. Resume must not mix different remote objects.
+- Anonymous staging must release incomplete storage immediately, including on
+  process death. A named `.part` plus next-start cleanup is insufficient.
+- Decode into bounded PCM outside the realtime output callback; do not let
+  blocking network/disk reads hold the device callback.
+- Local-source resolution includes lyrics, artwork, startup and error recovery:
+  a local hit cannot trigger account/API/CDN requests.
+- No EQ, time stretching, third-party fallback or GUI cover decoding is copied
+  merely because pigma includes it.
+
+Removing mpv does not establish lower memory or equivalent codec/device
+compatibility. Both need runtime verification, including the currently supported
+NetEase qualities, seeking, sample-rate/channel conversion and device reopen.
 
 ## Verification status
 

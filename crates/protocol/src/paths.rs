@@ -4,6 +4,18 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use crate::config::Config;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathEntry {
+    pub path: PathBuf,
+    pub kind: &'static str,
+    pub purpose: &'static str,
+    pub exists: Option<bool>,
+    pub lifecycle: &'static str,
+}
+
 /// XDG directories used by YoruPlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
@@ -47,10 +59,10 @@ impl Paths {
             }
         };
         Ok(Self {
-            config_dir,
-            data_dir,
-            cache_dir,
-            runtime_dir,
+            config_dir: absolute(config_dir)?,
+            data_dir: absolute(data_dir)?,
+            cache_dir: absolute(cache_dir)?,
+            runtime_dir: absolute(runtime_dir)?,
         })
     }
 
@@ -74,8 +86,236 @@ impl Paths {
         self.runtime_dir.join("yoruplay.lock")
     }
 
-    pub fn mpv_socket_file(&self) -> PathBuf {
-        self.runtime_dir.join("mpv.sock")
+    pub fn config_lock_file(&self) -> PathBuf {
+        Config::lock_path(&self.config_file())
+    }
+
+    pub fn metadata_dir(&self) -> PathBuf {
+        self.cache_dir.join("metadata")
+    }
+
+    pub fn audio_dir(&self, config: &Config) -> PathBuf {
+        if config.cache.audio.dir.is_empty() {
+            self.cache_dir.join("audio")
+        } else {
+            PathBuf::from(&config.cache.audio.dir)
+        }
+    }
+
+    pub fn audio_index_file(&self, config: &Config) -> PathBuf {
+        self.audio_dir(config).join("index.redb")
+    }
+
+    pub fn cache_lock_file(&self, config: &Config) -> PathBuf {
+        self.audio_dir(config).join("cache.lock")
+    }
+
+    pub fn queue_file(&self, revision: u64) -> PathBuf {
+        self.data_dir.join(format!("queue-{revision}.json"))
+    }
+
+    /// Inventory only: no directories, lock files or temporary files are opened.
+    pub fn inventory(&self, config: &Config) -> Vec<PathEntry> {
+        let audio = self.audio_dir(config);
+        let mut entries = Vec::new();
+        let mut add = |path: PathBuf, kind, purpose, lifecycle| {
+            let exists = if kind == "pattern" {
+                None
+            } else {
+                Some(path.exists())
+            };
+            entries.push(PathEntry {
+                path,
+                kind,
+                purpose,
+                exists,
+                lifecycle,
+            });
+        };
+        add(
+            self.config_dir.clone(),
+            "directory",
+            "Configuration root",
+            "preserved",
+        );
+        add(
+            self.config_file(),
+            "file",
+            "Typed TOML settings",
+            "preserved; atomic replacement",
+        );
+        add(
+            self.config_lock_file(),
+            "file",
+            "Configuration update ownership",
+            "persistent lock inode",
+        );
+        add(
+            self.config_dir.join(".config.toml.tmp-*-*"),
+            "pattern",
+            "Atomic configuration writes",
+            "removed after commit or failed write; crash remnants may remain",
+        );
+        add(
+            self.data_dir.clone(),
+            "directory",
+            "Private account and playback state",
+            "preserved",
+        );
+        add(
+            self.auth_file(),
+            "file",
+            "Saved credentials (contents never listed)",
+            "removed only by explicit logout",
+        );
+        add(
+            self.data_dir.join("auth.tmp-*"),
+            "pattern",
+            "Atomic credential updates",
+            "renamed on commit",
+        );
+        add(
+            self.state_file(),
+            "file",
+            "Compact playback state (v2)",
+            "v1 inline queues migrate on next save: publish queue, then state pointer",
+        );
+        add(
+            self.data_dir.join("state.tmp-*"),
+            "pattern",
+            "Atomic state writes",
+            "renamed on commit",
+        );
+        add(
+            self.data_dir.join("state.json.corrupt-*"),
+            "pattern",
+            "Quarantined invalid state",
+            "retained for recovery",
+        );
+        add(self.data_dir.join("queue-*.json"), "pattern", "Versioned queue revisions", "current revision retained; obsolete revisions removed after state commit; invalid/missing queue quarantines state, not queue");
+        add(
+            self.data_dir.join("queue-*.tmp-*"),
+            "pattern",
+            "Atomic queue revision writes",
+            "renamed on commit",
+        );
+        add(
+            self.cache_dir.clone(),
+            "directory",
+            "Cache root and logs",
+            "never recursively cleared by cache clear",
+        );
+        add(
+            self.metadata_dir(),
+            "directory",
+            "Metadata TTL cache",
+            "metadata-only clear and budget trimming",
+        );
+        add(
+            self.metadata_dir().join("*.json"),
+            "pattern",
+            "Cached metadata objects",
+            "TTL/budget/metadata clear",
+        );
+        add(
+            self.metadata_dir().join("*.tmp-*"),
+            "pattern",
+            "Atomic metadata writes",
+            "renamed on commit",
+        );
+        add(
+            audio.clone(),
+            "directory",
+            "Configured audio cache directory",
+            "managed audio only; directory changes require restart",
+        );
+        add(
+            audio.join("<id> - <artist> - <title> [<quality>]*.<ext>"),
+            "pattern",
+            "Complete native-format audio",
+            "FIFO eviction; pinned readers retain their inode",
+        );
+        add(
+            audio.join("*.<ext>.entry.json"),
+            "pattern",
+            "Complete-entry recovery manifests",
+            "streamed offline inspection; removed with managed audio",
+        );
+        add(
+            audio.join("<id>-<version>.<png|jpg>"),
+            "pattern",
+            "Bounded local artwork",
+            "removed with its owning cache entry",
+        );
+        add(
+            audio.join(".capability-*-*"),
+            "pattern",
+            "Explicit doctor filesystem capability probe",
+            "brief publication link removed immediately after probe",
+        );
+        add(
+            self.audio_index_file(config),
+            "file",
+            "Complete-entry disk index",
+            "owned by the audio cache",
+        );
+        add(
+            self.cache_lock_file(config),
+            "file",
+            "Shared cache ownership lock",
+            "persistent lock inode; daemon/offline mutations serialize",
+        );
+        add(
+            audio,
+            "unnamed_inode_backing",
+            "Anonymous staging and bounded disk scratch; no pathname",
+            "O_TMPFILE; last handle close/process death releases incomplete data",
+        );
+        add(
+            self.log_file(),
+            "file",
+            "Daemon log",
+            "never cache-cleared; no rotation implemented",
+        );
+        add(
+            self.tui_log_file(),
+            "file",
+            "TUI log",
+            "never cache-cleared; no rotation implemented",
+        );
+        add(
+            self.runtime_dir.clone(),
+            "directory",
+            "IPC runtime (UID-specific /tmp fallback without XDG_RUNTIME_DIR)",
+            "session/runtime lifetime",
+        );
+        add(
+            self.socket_file(),
+            "socket",
+            "Local daemon IPC",
+            "daemon shutdown removes socket",
+        );
+        add(
+            self.lock_file(),
+            "file",
+            "Daemon ownership lock",
+            "daemon ownership lifetime",
+        );
+        add(
+            std::env::temp_dir().join("yoruplay-firefox-*"),
+            "pattern",
+            "Firefox cookie import snapshot directories",
+            "private; deleted when import finishes",
+        );
+        for name in ["cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm"] {
+            add(
+                std::env::temp_dir().join("yoruplay-firefox-*").join(name),
+                "pattern",
+                "Firefox cookie import database snapshot",
+                "private; deleted with import temporary directory",
+            );
+        }
+        entries
     }
 
     pub fn log_file(&self) -> PathBuf {
@@ -100,6 +340,14 @@ impl Paths {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         }
         Ok(())
+    }
+}
+
+fn absolute(path: PathBuf) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 

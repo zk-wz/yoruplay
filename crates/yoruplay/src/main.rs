@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,13 +8,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use fs2::FileExt;
 use termtree::Tree;
+use yoruplay_core::audio_cache::AudioCache;
 use yoruplay_core::cache::FileCache;
-use yoruplay_core::mpv::MpvController;
 use yoruplay_ipc::{shutdown_any_version, IpcClient};
+use yoruplay_protocol::config::{ConfigKey, CONFIG_KEYS};
 use yoruplay_protocol::{
     Command, CommandResult, Config, ErrorInfo, Paths, PlayMode, PlaylistKind, PlaylistTracks,
-    SearchItems, SearchKind, SearchPage, Song, SongsView, StateSnapshot, LOGIN_URL,
+    Quality, SearchItems, SearchKind, SearchPage, Song, SongsView, StateSnapshot, LOGIN_URL,
 };
 
 #[derive(Parser, Debug)]
@@ -46,9 +48,13 @@ enum CliCommand {
     Search(SearchArgs),
     /// Account login and logout.
     Auth(AuthArgs),
-    /// Metadata cache.
+    /// Manage metadata and complete offline audio.
     Cache(CacheArgs),
-    /// Check mpv, PipeWire, the daemon, MPRIS and file permissions.
+    /// Inspect or atomically update typed configuration.
+    Config(ConfigArgs),
+    /// List all generated paths without creating anything.
+    Listpath,
+    /// Check the Rust audio device, cache filesystem and daemon.
     Doctor,
     /// Print log file locations and tail commands.
     Logs,
@@ -76,9 +82,9 @@ struct DaemonArgs {
 enum DaemonAction {
     /// Start a detached daemon and wait until its socket is ready.
     Start,
-    /// Gracefully stop the daemon and reap mpv.
+    /// Gracefully stop the daemon and release audio resources.
     Stop,
-    /// Show daemon, login and playback status.
+    /// Show lightweight daemon and playback status.
     Status,
 }
 
@@ -116,8 +122,15 @@ struct QueueArgs {
 
 #[derive(Subcommand, Debug)]
 enum QueueAction {
-    /// Print the queue.
-    List,
+    /// Print a page of the queue.
+    List {
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Play one complete cached song without network access.
+    PlayCache { id: u64 },
     /// Play a queue entry by zero-based index.
     Play { index: usize },
     /// Remove one queue entry by zero-based index.
@@ -200,10 +213,54 @@ struct CacheArgs {
 
 #[derive(Subcommand, Debug)]
 enum CacheAction {
-    /// Remove all cache entries.
-    Clear,
-    /// Show cache size and configuration.
+    /// Remove metadata only unless an explicit audio/all scope is selected.
+    Clear {
+        #[arg(long, conflicts_with = "all")]
+        audio: bool,
+        #[arg(long, conflicts_with = "audio")]
+        all: bool,
+    },
+    /// Show metadata, audio, index, scratch and log accounting.
     Info,
+    /// List complete offline audio summaries (at most 100 per page).
+    List {
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Page size, from 1 to 100.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Explicitly upgrade a cached song; requires a running daemon.
+    Upgrade {
+        id: u64,
+        #[arg(long)]
+        quality: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    action: Option<ConfigAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// List all typed keys, effective values and application boundaries.
+    List,
+    /// Show one effective setting and its source.
+    Get { key: String },
+    /// Validate and atomically persist one setting, retaining comments.
+    Set { key: String, value: String },
+    /// Reset one key; resetting every key requires --all --yes.
+    Reset {
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        key: Option<String>,
+        #[arg(long, conflicts_with = "key", requires = "yes")]
+        all: bool,
+        #[arg(long, requires = "all")]
+        yes: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -245,6 +302,7 @@ fn intercept_help() -> bool {
             "library" => Some(HelpTopic::Library),
             "auth" => Some(HelpTopic::Auth),
             "cache" => Some(HelpTopic::Cache),
+            "config" => Some(HelpTopic::Config),
             _ => None,
         },
         [name, flag] if matches!(flag.as_str(), "--help" | "-h" | "help") => match name.as_str() {
@@ -254,6 +312,7 @@ fn intercept_help() -> bool {
             "library" => Some(HelpTopic::Library),
             "auth" => Some(HelpTopic::Auth),
             "cache" => Some(HelpTopic::Cache),
+            "config" => Some(HelpTopic::Config),
             _ => None,
         },
         [name, sub] if name == "help" => match sub.as_str() {
@@ -263,6 +322,7 @@ fn intercept_help() -> bool {
             "library" => Some(HelpTopic::Library),
             "auth" => Some(HelpTopic::Auth),
             "cache" => Some(HelpTopic::Cache),
+            "config" => Some(HelpTopic::Config),
             _ => None,
         },
         _ => None,
@@ -275,7 +335,7 @@ fn intercept_help() -> bool {
     }
 }
 
-#[tokio::main]
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     if intercept_help() {
         return Ok(());
@@ -296,7 +356,7 @@ async fn main() -> Result<()> {
             yoruplay_tui::run(paths, config).await
         }
         other => {
-            let config = load_config(&paths)?;
+            let config = Config::load_readonly(&paths.config_file())?;
             init_stderr_logging(&config.log.level);
             run_command(other, cli.json, paths, config).await
         }
@@ -311,15 +371,22 @@ async fn run_command(command: CliCommand, json: bool, paths: Paths, config: Conf
         CliCommand::Library(args) => library_command(args, &paths, json).await,
         CliCommand::Search(args) => search_command(args, &paths, json).await,
         CliCommand::Auth(args) => auth_command(args, &paths, json).await,
-        CliCommand::Cache(args) => cache_command(args, &paths, &config).await,
-        CliCommand::Doctor => doctor(&paths, &config).await,
+        CliCommand::Cache(args) => cache_command(args, &paths, &config, json).await,
+        CliCommand::Config(args) => config_command(args, &paths, &config, json).await,
+        CliCommand::Listpath => listpath(&paths, &config, json).await,
+        CliCommand::Doctor => doctor(&paths, &config, json).await,
         CliCommand::Logs => {
-            println!("Daemon log: tail -f {}", paths.log_file().display());
-            println!("TUI log: tail -f {}", paths.tui_log_file().display());
-            Ok(())
+            let value = serde_json::json!({"daemon":paths.log_file(),"tui":paths.tui_log_file()});
+            if json {
+                print_json(&value)
+            } else {
+                println!("Daemon log: tail -f {}", paths.log_file().display());
+                println!("TUI log: tail -f {}", paths.tui_log_file().display());
+                Ok(())
+            }
         }
         CliCommand::Uninstall { yes, remove_binary } => {
-            uninstall(&paths, &config, yes, remove_binary).await
+            uninstall(&paths, &config, yes, remove_binary, json).await
         }
         CliCommand::Tui | CliCommand::InternalDaemon => unreachable!("handled in main"),
     }
@@ -334,13 +401,21 @@ async fn daemon_command(args: DaemonArgs, paths: &Paths, json: bool) -> Result<(
         DaemonAction::Start => match IpcClient::connect(paths.socket_file()).await {
             Ok(client) => {
                 client.close().await;
-                println!("Daemon is already running.");
+                if json {
+                    print_json(&CommandResult::ack_msg("Daemon is already running."))?;
+                } else {
+                    println!("Daemon is already running.");
+                }
                 Ok(())
             }
             Err(_) => {
                 let client = ensure_daemon(paths).await?;
                 client.close().await;
-                println!("Daemon started in the background.");
+                if json {
+                    print_json(&CommandResult::ack_msg("Daemon started in the background."))?;
+                } else {
+                    println!("Daemon started in the background.");
+                }
                 Ok(())
             }
         },
@@ -350,13 +425,11 @@ async fn daemon_command(args: DaemonArgs, paths: &Paths, json: bool) -> Result<(
 }
 
 async fn status_command(paths: &Paths, json: bool) -> Result<()> {
-    let result = send(paths, Command::GetState).await?;
+    let result = send(paths, Command::GetPlayback).await?;
     if json {
         return print_json(&result);
     }
-    let snapshot = expect_state(result)?;
-    print_state(&snapshot);
-    Ok(())
+    print_result(result)
 }
 
 async fn control_command(args: ControlArgs, paths: &Paths, json: bool) -> Result<()> {
@@ -392,9 +465,14 @@ async fn control_command(args: ControlArgs, paths: &Paths, json: bool) -> Result
                 .await
             }
             None => {
-                let result = send(paths, Command::GetState).await?;
-                let snapshot = expect_state(result)?;
-                println!("Volume: {:.0}%", snapshot.playback.volume * 100.0);
+                let result = send(paths, Command::GetPlayback).await?;
+                if json {
+                    return print_json(&result);
+                }
+                let CommandResult::Playback(playback) = result else {
+                    bail!("unexpected daemon response");
+                };
+                println!("Volume: {:.0}%", playback.volume * 100.0);
                 Ok(())
             }
         },
@@ -421,14 +499,19 @@ async fn queue_command(args: QueueArgs, paths: &Paths, json: bool) -> Result<()>
         return Ok(());
     }
     match args.action.expect("checked above") {
-        QueueAction::List => {
-            let result = send(paths, Command::GetState).await?;
+        QueueAction::List { offset, limit } => {
+            let result = send(paths, Command::GetQueue { offset, limit }).await?;
             if json {
                 return print_json(&result);
             }
-            let snapshot = expect_state(result)?;
-            print_queue(&snapshot);
+            match result {
+                CommandResult::Queue(queue) => print_queue(&queue),
+                other => return print_result(other),
+            }
             Ok(())
+        }
+        QueueAction::PlayCache { id } => {
+            ack(paths, Command::PlayCached { song_id: id }, json).await
         }
         QueueAction::Play { index } => ack(paths, Command::QueuePlay { index }, json).await,
         QueueAction::Remove { index } => ack(paths, Command::QueueRemove { index }, json).await,
@@ -439,6 +522,7 @@ async fn queue_command(args: QueueArgs, paths: &Paths, json: bool) -> Result<()>
                 Command::StartPlaylist {
                     id,
                     start_index: start,
+                    start_song_id: None,
                 },
                 json,
             )
@@ -570,7 +654,7 @@ async fn auth_command(args: AuthArgs, paths: &Paths, json: bool) -> Result<()> {
         return Ok(());
     }
     match args.action.expect("checked above") {
-        AuthAction::Login(args) => login(paths, args).await,
+        AuthAction::Login(args) => login(paths, args, json).await,
         AuthAction::Logout => {
             let result = send(paths, Command::Logout).await?;
             if json {
@@ -591,6 +675,7 @@ enum HelpTopic {
     Library,
     Auth,
     Cache,
+    Config,
 }
 
 fn help_item(name: &str, description: &str) -> String {
@@ -605,8 +690,8 @@ fn help_daemon(root: bool) -> Tree<String> {
     };
     Tree::new(label).with_leaves([
         help_item("start", "Start a detached daemon and wait for its socket"),
-        help_item("stop", "Gracefully stop the daemon and reap mpv"),
-        help_item("status", "Show daemon, login and playback status"),
+        help_item("stop", "Gracefully stop the daemon and release audio"),
+        help_item("status", "Show lightweight daemon and playback status"),
     ])
 }
 
@@ -635,7 +720,11 @@ fn help_queue(root: bool) -> Tree<String> {
         "yoruplay queue".to_string()
     };
     Tree::new(label).with_leaves([
-        help_item("list", "Print the queue"),
+        help_item("list", "Print a queue page (--offset, --limit)"),
+        help_item(
+            "play-cache <id>",
+            "Play cached audio without network access",
+        ),
         help_item("play <index>", "Play a queue entry"),
         help_item("remove <index>", "Remove a queue entry"),
         help_item("clear", "Clear the queue"),
@@ -679,14 +768,45 @@ fn help_auth(root: bool) -> Tree<String> {
 
 fn help_cache(root: bool) -> Tree<String> {
     let label = if root {
-        help_item("cache", "Metadata cache")
+        help_item("cache", "Metadata and complete offline audio")
     } else {
         "yoruplay cache".to_string()
     };
     Tree::new(label).with_leaves([
-        help_item("clear", "Remove all cache entries"),
-        help_item("info", "Show cache size and configuration"),
+        help_item(
+            "clear [--audio|--all]",
+            "Default scope: metadata only; never logs",
+        ),
+        help_item("info", "Show audio, metadata, scratch and index accounting"),
+        help_item("list", "List complete audio (--offset, --limit 1..100)"),
+        help_item("upgrade <id>", "Explicit network upgrade (--quality)"),
     ])
+}
+
+fn help_config(root: bool) -> Tree<String> {
+    let label = if root {
+        help_item("config", "Typed configuration; no daemon autostart")
+    } else {
+        "yoruplay config".to_string()
+    };
+    let mut tree = Tree::new(label).with_leaves([
+        help_item(
+            "list",
+            "List effective settings, types and apply boundaries",
+        ),
+        help_item("get <key>", "Read one setting without creating files"),
+        help_item("set <key> <value>", "Persist one typed value atomically"),
+        help_item("reset [key]", "Reset one key, or --all --yes"),
+    ]);
+    let mut keys = Tree::new("Configuration keys (cache.audio.max_gb also accepts G)".to_string());
+    for key in CONFIG_KEYS {
+        keys.push(help_item(
+            key.key,
+            &format!("{:?}; {}; {}", key.value_type, key.unit, key.apply),
+        ));
+    }
+    tree.push(keys);
+    tree
 }
 
 fn help_root() -> Tree<String> {
@@ -705,9 +825,14 @@ fn help_root() -> Tree<String> {
     ));
     root.push(help_auth(true));
     root.push(help_cache(true));
+    root.push(help_config(true));
+    root.push(help_item(
+        "listpath",
+        "List all generated paths without creating files",
+    ));
     root.push(help_item(
         "doctor",
-        "Check mpv, PipeWire, daemon, MPRIS, permissions",
+        "Check Rust audio, cache filesystem and daemon",
     ));
     root.push(help_item("logs", "Print log paths and tail commands"));
     root.push(help_item("uninstall", "Remove cache and runtime state"));
@@ -724,6 +849,7 @@ fn print_help(topic: HelpTopic) {
         HelpTopic::Library => help_library(false),
         HelpTopic::Auth => help_auth(false),
         HelpTopic::Cache => help_cache(false),
+        HelpTopic::Config => help_config(false),
     };
     print!("{tree}");
     println!();
@@ -740,7 +866,7 @@ async fn send(paths: &Paths, command: Command) -> Result<CommandResult> {
     Ok(result)
 }
 
-/// Stop the daemon. IPC shutdown saves the queue and reaps mpv; the raw
+/// Stop the daemon. IPC shutdown saves the queue and releases audio; the raw
 /// handshake is only for an older daemon during an upgrade.
 async fn shutdown_daemon(paths: &Paths, json: bool) -> Result<()> {
     let message = match IpcClient::connect(paths.socket_file()).await {
@@ -876,7 +1002,7 @@ async fn ensure_daemon(paths: &Paths) -> Result<IpcClient> {
     ))
 }
 
-async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
+async fn login(paths: &Paths, args: LoginArgs, json: bool) -> Result<()> {
     let client = ensure_daemon(paths).await?;
     if args.cookie_stdin {
         let mut cookie = String::new();
@@ -894,7 +1020,7 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
             .await
             .map_err(ipc_error)?;
         client.close().await;
-        print_auth_result(result)
+        print_auth_result(result, json)
     } else {
         // Fast path: a valid Firefox session is enough; do not open a browser.
         if !args.switch_account {
@@ -904,7 +1030,7 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
             {
                 Ok(result) => {
                     client.close().await;
-                    return print_auth_result(result);
+                    return print_auth_result(result, json);
                 }
                 Err(error)
                     if matches!(
@@ -923,10 +1049,10 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
             }
         }
 
-        println!("Opening {LOGIN_URL} in your browser.");
+        eprintln!("Opening {LOGIN_URL} in your browser.");
         open_login_page();
-        println!("Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...");
-        println!("Other browsers are not supported yet; use --cookie-stdin for those.");
+        eprintln!("Log in there in Firefox. Waiting for a Firefox MUSIC_U cookie...");
+        eprintln!("Other browsers are not supported yet; use --cookie-stdin for those.");
         let mut same_account_reported = false;
         for _ in 0..150 {
             match client
@@ -937,7 +1063,7 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
             {
                 Ok(result) => {
                     client.close().await;
-                    return print_auth_result(result);
+                    return print_auth_result(result, json);
                 }
                 Err(error)
                     if matches!(
@@ -953,7 +1079,7 @@ async fn login(paths: &Paths, args: LoginArgs) -> Result<()> {
                 }
                 Err(error) if error.code == "browser_same_account" => {
                     if !same_account_reported {
-                        println!(
+                        eprintln!(
                             "Firefox is still logged in as the current account; switch accounts there."
                         );
                         same_account_reported = true;
@@ -980,7 +1106,10 @@ fn open_login_page() {
         .spawn();
 }
 
-fn print_auth_result(result: CommandResult) -> Result<()> {
+fn print_auth_result(result: CommandResult, json: bool) -> Result<()> {
+    if json {
+        return print_json(&result);
+    }
     match result {
         CommandResult::Auth(auth) => {
             if auth.logged_in {
@@ -998,154 +1127,411 @@ fn print_auth_result(result: CommandResult) -> Result<()> {
     }
 }
 
-async fn cache_command(args: CacheArgs, paths: &Paths, config: &Config) -> Result<()> {
-    if args.action.is_none() {
+async fn cache_command(args: CacheArgs, paths: &Paths, config: &Config, json: bool) -> Result<()> {
+    let Some(action) = args.action else {
         print_help(HelpTopic::Cache);
         return Ok(());
-    }
-    let cache = FileCache::new(paths.cache_dir.clone(), config.cache.max_mb);
-    match args.action.expect("checked above") {
-        CacheAction::Clear => {
-            if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
-                let result = client
-                    .request(Command::ClearCache)
-                    .await
-                    .map_err(ipc_error)?;
-                client.close().await;
-                return print_result(result);
-            }
-            let before = cache.size_bytes();
-            cache.clear()?;
-            println!("Cache cleared ({before} bytes).");
-            Ok(())
+    };
+    if let CacheAction::List { limit, .. } = &action {
+        if *limit == 0 || *limit > 100 {
+            bail!("limit must be between 1 and 100");
         }
+    }
+    let command = match &action {
+        CacheAction::Info => Command::CacheInfo,
+        CacheAction::List { offset, limit } => Command::CacheList {
+            offset: *offset,
+            limit: *limit,
+        },
+        CacheAction::Clear { audio: true, all } => Command::ClearAudioCache { all: *all },
+        CacheAction::Clear { all: true, .. } => Command::ClearAudioCache { all: true },
+        CacheAction::Clear { .. } => Command::ClearCache,
+        CacheAction::Upgrade { id, quality } => Command::UpgradeAudio {
+            song_id: *id,
+            quality: quality.as_deref().map(parse_quality).transpose()?,
+        },
+    };
+    if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
+        let response = client.request(command).await;
+        client.close().await;
+        let mut result = response.map_err(ipc_error)?;
+        if matches!(action, CacheAction::Info) {
+            let CommandResult::Data(info) = &mut result else {
+                bail!("unexpected cache information response");
+            };
+            let metadata = FileCache::new(paths.metadata_dir(), config.cache.max_mb);
+            info["daemon_running"] = serde_json::json!(true);
+            info["persisted_config"] = serde_json::json!(config);
+            info["configured_audio_dir"] = serde_json::json!(paths.audio_dir(config));
+            info["metadata"] = serde_json::json!({"dir":metadata.dir(),"bytes":metadata.size_bytes(),"configured_limit_bytes":metadata.max_bytes(),"configured_lyrics_ttl_hours":config.cache.lyrics_ttl_hours});
+            info["logs"] = serde_json::json!({"daemon_bytes":file_bytes(&paths.log_file()),"tui_bytes":file_bytes(&paths.tui_log_file()),"included_in_cache":false});
+        }
+        return if json {
+            print_json(&result)
+        } else {
+            print_result(result)
+        };
+    }
+    let dir = paths.audio_dir(config);
+    let max_bytes = audio_budget(config);
+    let metadata = FileCache::new(paths.metadata_dir(), config.cache.max_mb);
+    let value = match action {
         CacheAction::Info => {
-            println!("Cache directory: {}", cache.dir().display());
-            println!("Size: {} bytes", cache.size_bytes());
-            println!("Limit: {} bytes", cache.max_bytes());
-            println!(
-                "Lyrics TTL: {} hours; daily recommendations: 6 hours",
-                config.cache.lyrics_ttl_hours
-            );
-            Ok(())
+            let audio = AudioCache::inspect(&dir, max_bytes, config.cache.audio.enabled)?;
+            serde_json::json!({
+                "daemon_running": false,
+                "metadata": {"dir":metadata.dir(),"bytes":metadata.size_bytes(),"limit_bytes":metadata.max_bytes(),"lyrics_ttl_hours":config.cache.lyrics_ttl_hours},
+                "audio":audio,
+                "logs":{"daemon_bytes":file_bytes(&paths.log_file()),"tui_bytes":file_bytes(&paths.tui_log_file()),"included_in_cache":false},
+                "persisted_config":config,
+                "active_config":null,
+                "pending":"daemon_not_running"
+            })
+        }
+        CacheAction::List { offset, limit } => {
+            let entries = AudioCache::list_offline(&dir, offset, limit)?;
+            serde_json::json!({"entries":entries,"offset":offset,"limit":limit,"daemon_running":false})
+        }
+        CacheAction::Clear { audio, all } => {
+            if audio || all {
+                let cache = AudioCache::open(dir, max_bytes, config.cache.audio.enabled)?;
+                let audio_result = cache.clear()?;
+                let before = metadata.size_bytes();
+                if all { metadata.clear()?; }
+                serde_json::json!({"audio":audio_result,"metadata_removed_bytes":if all { before.saturating_sub(metadata.size_bytes()) } else { 0 },"scope":if all { "all" } else { "audio" },"logs_preserved":true})
+            } else {
+                // Do not open/reconfigure the audio owner: metadata clear must never trim audio.
+                fs::create_dir_all(&dir)?;
+                let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(paths.cache_lock_file(config))?;
+                lock.try_lock_exclusive().context("cache is owned by a daemon; retry using its IPC connection")?;
+                let before = metadata.size_bytes();
+                metadata.clear()?;
+                serde_json::json!({"scope":"metadata","removed_bytes":before.saturating_sub(metadata.size_bytes()),"audio_preserved":true,"logs_preserved":true})
+            }
+        }
+        CacheAction::Upgrade { .. } => bail!("cache upgrade requires a running daemon; start it explicitly with `yoruplay daemon start`"),
+    };
+    if json {
+        print_json(&CommandResult::Data(value))
+    } else {
+        print_json(&value)
+    }
+}
+
+fn audio_budget(config: &Config) -> u64 {
+    (config.cache.audio.max_gb * 1024.0 * 1024.0 * 1024.0) as u64
+}
+
+fn file_bytes(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn parse_quality(input: &str) -> Result<Quality> {
+    match input {
+        "standard" => Ok(Quality::Standard),
+        "higher" => Ok(Quality::Higher),
+        "exhigh" => Ok(Quality::Exhigh),
+        "lossless" => Ok(Quality::Lossless),
+        "hires" => Ok(Quality::Hires),
+        _ => bail!("invalid quality `{input}`; use standard, higher, exhigh, lossless or hires"),
+    }
+}
+
+/// Local IPC only. Absence and connection/reload failures remain distinguishable.
+async fn daemon_data(
+    paths: &Paths,
+    command: Command,
+) -> (Option<serde_json::Value>, Option<String>) {
+    if !paths.socket_file().exists() {
+        return (None, None);
+    }
+    match IpcClient::connect(paths.socket_file()).await {
+        Ok(client) => {
+            let result = client.request(command).await;
+            client.close().await;
+            match result {
+                Ok(CommandResult::Data(value)) => (Some(value), None),
+                Ok(other) => (None, Some(format!("unexpected daemon response: {other:?}"))),
+                Err(error) => (None, Some(ipc_error(error).to_string())),
+            }
+        }
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+fn dotted_value<'a>(mut value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    for part in key.split('.') {
+        value = value.get(part)?;
+    }
+    Some(value)
+}
+
+async fn config_command(
+    args: ConfigArgs,
+    paths: &Paths,
+    config: &Config,
+    json: bool,
+) -> Result<()> {
+    let Some(action) = args.action else {
+        print_help(HelpTopic::Config);
+        return Ok(());
+    };
+    match action {
+        ConfigAction::List | ConfigAction::Get { .. } => {
+            let selected = match &action {
+                ConfigAction::Get { key } => Some(ConfigKey::find(key)?.key),
+                _ => None,
+            };
+            let persisted = Config::persisted_keys(&paths.config_file())?;
+            let defaults = Config::default();
+            let (runtime, runtime_error) = daemon_data(paths, Command::CacheInfo).await;
+            let active_config = runtime
+                .as_ref()
+                .and_then(|value| value.get("active_config"));
+            let mut entries = Vec::new();
+            for entry in CONFIG_KEYS
+                .iter()
+                .filter(|entry| selected.is_none_or(|key| entry.key == key))
+            {
+                let value = config.value(entry.key)?;
+                let active = active_config.and_then(|active| dotted_value(active, entry.key));
+                let pending = match active {
+                    Some(active) => serde_json::json!(active != &value),
+                    None => serde_json::Value::Null,
+                };
+                entries.push(serde_json::json!({
+                    "key":entry.key,"value":value,"default":defaults.value(entry.key)?,
+                    "type":entry.value_type,"unit":entry.unit,"choices":entry.choices,
+                    "source":if persisted.iter().any(|key| key == entry.key) { "file" } else { "default" },
+                    "apply":entry.apply,"active":active,"pending":pending,
+                    "runtime_state":if active_config.is_some() { "reported_by_daemon" } else if runtime_error.is_some() { "unavailable" } else { "daemon_not_running" },
+                    "environment_override":if entry.key == "log.level" { std::env::var("RUST_LOG").ok() } else { None }
+                }));
+            }
+            let value = serde_json::json!({"config_file":paths.config_file(),"entries":entries,"runtime_error":runtime_error});
+            if json {
+                print_json(&value)
+            } else {
+                for entry in value["entries"].as_array().expect("entries array") {
+                    println!(
+                        "{} = {}  [{}; {}; source={}; apply={}; active={}; pending={}; runtime={}]",
+                        entry["key"].as_str().unwrap_or(""),
+                        entry["value"],
+                        entry["type"],
+                        entry["unit"],
+                        entry["source"],
+                        entry["apply"],
+                        entry["active"],
+                        entry["pending"],
+                        entry["runtime_state"]
+                    );
+                    if !entry["environment_override"].is_null() {
+                        println!("  RUST_LOG override: {}", entry["environment_override"]);
+                    }
+                }
+                if let Some(error) = value["runtime_error"].as_str() {
+                    println!("Runtime unavailable: {error}");
+                }
+                Ok(())
+            }
+        }
+        ConfigAction::Set { key, value } => {
+            let updated = Config::set(&paths.config_file(), &key, &value)?;
+            report_config_write(paths, &updated, Some(&key), json).await
+        }
+        ConfigAction::Reset { key, all, yes } => {
+            let updated = if all && yes {
+                Config::reset_all(&paths.config_file())?
+            } else if let Some(key) = key.as_deref() {
+                Config::reset(&paths.config_file(), key)?
+            } else {
+                bail!("reset requires a key, or --all --yes");
+            };
+            report_config_write(paths, &updated, key.as_deref(), json).await
         }
     }
 }
 
-async fn doctor(paths: &Paths, config: &Config) -> Result<()> {
-    println!("YoruPlay {}", env!("CARGO_PKG_VERSION"));
-    println!("Config: {}", paths.config_file().display());
-    println!("Auth:   {}", paths.auth_file().display());
-    match fs::metadata(paths.auth_file()) {
-        Ok(meta) => println!("Auth permissions: {:o}", meta.permissions().mode() & 0o777),
-        Err(_) => println!("Auth permissions: not logged in"),
-    }
-    println!("Socket: {}", paths.socket_file().display());
-    println!(
-        "Cache:  {} ({} bytes, limit {})",
-        paths.cache_dir.display(),
-        FileCache::new(paths.cache_dir.clone(), config.cache.max_mb).size_bytes(),
-        config.cache.max_mb * 1024 * 1024
-    );
-    match MpvController::available_version().await {
-        Ok(version) => println!("mpv:    {version}"),
-        Err(e) => println!("mpv:    ERROR: {}", e.user_message()),
-    }
-    match ProcessCommand::new("pactl").arg("info").output() {
-        Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text
-                .lines()
-                .filter(|l| l.starts_with("Server Name:") || l.starts_with("Default Sink:"))
-            {
-                println!("{line}");
-            }
+async fn report_config_write(
+    paths: &Paths,
+    config: &Config,
+    key: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let (runtime, error) = daemon_data(paths, Command::ReloadConfig).await;
+    let value = serde_json::json!({
+        "persisted":true,"config_file":paths.config_file(),"key":key,
+        "value":key.map(|key| config.value(key)).transpose()?,
+        "runtime":runtime,"runtime_error":error,
+        "status":if runtime.is_some() { "daemon_reported" } else if error.is_some() { "persisted_reload_failed" } else { "persisted_daemon_not_running" },
+        "applied":runtime.as_ref().and_then(|value| value.get("applied")),
+        "pending":runtime.as_ref().and_then(|value| value.get("pending")).cloned().unwrap_or_else(|| serde_json::json!("daemon_start_required")),
+        "RUST_LOG":std::env::var("RUST_LOG").ok(),
+    });
+    if json {
+        print_json(&value)?;
+    } else {
+        println!("Persisted: {}", paths.config_file().display());
+        println!("Runtime: {}", value["status"]);
+        println!(
+            "Applied: {}; pending: {}",
+            value["applied"], value["pending"]
+        );
+        if let Some(error) = value["runtime_error"].as_str() {
+            println!("Reload failed: {error}");
         }
-        _ => println!("PipeWire/PulseAudio: pactl info failed"),
     }
-    match IpcClient::connect(paths.socket_file()).await {
-        Ok(client) => {
-            let state = client.request(Command::GetState).await;
-            client.close().await;
-            match state {
-                Ok(CommandResult::State(snapshot)) => {
-                    println!(
-                        "Daemon: running; mpv_available={}, status={:?}, queue={}",
-                        snapshot.playback.mpv_available,
-                        snapshot.playback.status,
-                        snapshot.playback.queue_len
-                    );
-                    for warning in snapshot.warnings {
-                        println!("Warning: {warning}");
-                    }
-                }
-                _ => println!("Daemon: running but did not answer GetState"),
-            }
-        }
-        Err(_) => println!("Daemon: not running"),
-    }
-    match ProcessCommand::new("busctl")
-        .args(["--user", "status", "org.mpris.MediaPlayer2.yoruplay"])
-        .output()
-    {
-        Ok(output) if output.status.success() => println!("MPRIS:  registered"),
-        _ => println!("MPRIS:  not registered (busctl unavailable or daemon not running)"),
+    if error.is_some() {
+        bail!("configuration persisted, but the running daemon could not reload it");
     }
     Ok(())
 }
 
-async fn uninstall(paths: &Paths, config: &Config, yes: bool, remove_binary: bool) -> Result<()> {
-    if !yes {
-        bail!(
-            "Refusing to remove cache/runtime state without --yes.\n\
-             Credentials and config are never removed by this command."
+async fn listpath(paths: &Paths, config: &Config, json: bool) -> Result<()> {
+    let (runtime, runtime_error) = daemon_data(paths, Command::CacheInfo).await;
+    let active = runtime
+        .as_ref()
+        .and_then(|value| value.get("active_audio_dir"))
+        .cloned();
+    let mut entries = paths.inventory(config);
+    if let Some(path) = active.as_ref().and_then(|value| value.as_str()) {
+        let path = PathBuf::from(path);
+        if path != paths.audio_dir(config) {
+            entries.push(yoruplay_protocol::paths::PathEntry {
+                exists: Some(path.exists()),
+                path,
+                kind: "directory",
+                purpose: "Active daemon audio directory (configured path pending restart)",
+                lifecycle: "old cache preserved; no automatic migration or deletion",
+            });
+        }
+    }
+    let value = serde_json::json!({
+        "paths":entries,"configured_audio_dir":paths.audio_dir(config),
+        "active_audio_dir":active,"runtime_error":runtime_error,
+        "audio_directory_pending_restart":active.as_ref().and_then(|path| path.as_str()).map(|path| Path::new(path) != paths.audio_dir(config)),
+    });
+    if json {
+        print_json(&value)
+    } else {
+        for entry in entries {
+            println!(
+                "{}  [{}; exists={:?}] {} — {}",
+                entry.path.display(),
+                entry.kind,
+                entry.exists,
+                entry.purpose,
+                entry.lifecycle
+            );
+        }
+        println!("Configured audio: {}", paths.audio_dir(config).display());
+        println!(
+            "Active audio: {}; pending restart: {}",
+            value["active_audio_dir"], value["audio_directory_pending_restart"]
         );
+        if let Some(error) = value["runtime_error"].as_str() {
+            println!("Runtime unavailable: {error}");
+        }
+        Ok(())
     }
-    let current = std::env::current_exe().ok();
-    if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
-        let _ = client.request(Command::Shutdown).await;
+}
+
+async fn doctor(paths: &Paths, config: &Config, _json: bool) -> Result<()> {
+    let device = config.playback.audio_device.clone();
+    let audio = tokio::task::spawn_blocking(move || yoruplay_core::audio::doctor(&device)).await?;
+    let dir = paths.audio_dir(config);
+    let filesystem =
+        tokio::task::spawn_blocking(move || yoruplay_core::audio_cache::probe_filesystem(&dir))
+            .await?;
+    let failed = audio.is_err() || filesystem.is_err();
+    let daemon = match IpcClient::connect(paths.socket_file()).await {
+        Ok(client) => {
+            let result = client.request(Command::GetPlayback).await;
+            client.close().await;
+            match result {
+                Ok(result) => serde_json::to_value(result)?,
+                Err(error) => serde_json::json!({"error":ipc_error(error).to_string()}),
+            }
+        }
+        Err(error) => serde_json::json!({"running":false,"detail":error.to_string()}),
+    };
+    let value = serde_json::json!({
+        "version":env!("CARGO_PKG_VERSION"),"config":paths.config_file(),"auth":paths.auth_file(),"socket":paths.socket_file(),
+        "auth_permissions":fs::metadata(paths.auth_file()).ok().map(|meta| format!("{:o}",meta.permissions().mode() & 0o777)),
+        "audio":match audio { Ok(value) => value, Err(error) => serde_json::json!({"error":error.to_string()}) },
+        "cache_filesystem":match filesystem { Ok(value) => value, Err(error) => serde_json::json!({"error":error.to_string()}) },
+        "daemon":daemon,
+    });
+    print_json(&value)?;
+    if failed {
+        bail!("audio or cache-filesystem diagnostics failed; see the diagnostic output");
+    }
+    Ok(())
+}
+
+async fn uninstall(
+    paths: &Paths,
+    config: &Config,
+    yes: bool,
+    remove_binary: bool,
+    json: bool,
+) -> Result<()> {
+    if !yes {
+        bail!("Refusing to remove cache/runtime state without --yes. Credentials and config are never removed.");
+    }
+    if paths.socket_file().exists() {
+        let client = connect(paths).await?;
+        let result = client.request(Command::Shutdown).await;
         client.close().await;
-        let _ = wait_for_socket_removal(paths, Duration::from_secs(5)).await;
+        result.map_err(ipc_error)?;
+        if !wait_for_socket_removal(paths, Duration::from_secs(10)).await {
+            bail!("daemon did not exit; refusing to remove its cache/runtime state");
+        }
     }
-    let _ = fs::remove_file(paths.socket_file());
-    let _ = fs::remove_file(paths.lock_file());
-    let cache = FileCache::new(paths.cache_dir.clone(), config.cache.max_mb);
-    let _ = cache.clear();
-    println!(
-        "Removed runtime socket, lock and cache. Preserved account and configuration files. Remove them manually only if you are sure:"
-    );
-    println!("  {}", paths.auth_file().display());
-    println!("  {}", paths.config_file().display());
+    let cache = AudioCache::open(
+        paths.audio_dir(config),
+        audio_budget(config),
+        config.cache.audio.enabled,
+    )?;
+    let audio = cache.clear()?;
+    let metadata = FileCache::new(paths.metadata_dir(), config.cache.max_mb);
+    let before = metadata.size_bytes();
+    metadata.clear()?;
+    let mut binary_removed = None;
+    let mut binary_preserved = std::env::current_exe().ok();
     if remove_binary {
-        if let Some(exe) = current {
+        if let Some(exe) = binary_preserved.as_ref() {
             let home = std::env::var_os("HOME").map(PathBuf::from);
-            let inside_home = home.as_ref().is_some_and(|home| exe.starts_with(home));
-            if inside_home {
-                fs::remove_file(&exe).with_context(|| format!("remove {}", exe.display()))?;
-                println!("Removed executable {}", exe.display());
+            if home.as_ref().is_some_and(|home| exe.starts_with(home)) {
+                fs::remove_file(exe).with_context(|| format!("remove {}", exe.display()))?;
+                binary_removed = Some(exe.clone());
+                binary_preserved = None;
             } else {
-                println!(
-                    "Executable {} is outside HOME; remove it manually.",
+                bail!(
+                    "refusing to remove executable outside HOME: {}",
                     exe.display()
                 );
             }
         }
-    } else {
-        if let Some(exe) = current {
-            println!(
-                "Remove the executable manually if desired: {}",
-                exe.display()
-            );
-        }
     }
-    Ok(())
+    let value = serde_json::json!({
+        "audio":audio,"metadata_removed_bytes":before.saturating_sub(metadata.size_bytes()),
+        "preserved":{"auth":paths.auth_file(),"config":paths.config_file(),"logs":[paths.log_file(),paths.tui_log_file()],"state":paths.state_file()},
+        "binary_removed":binary_removed,"binary_preserved":binary_preserved,
+    });
+    if json {
+        print_json(&value)
+    } else {
+        println!("Removed managed audio and metadata; daemon stopped. Credentials, configuration, logs and saved playback state preserved.");
+        print_json(&value)
+    }
 }
 
 fn load_config(paths: &Paths) -> Result<Config> {
     paths.ensure_dirs().context("create XDG directories")?;
-    let mut config = Config::load_or_create(&paths.config_file()).map_err(|e| anyhow!("{}", e))?;
-    config.validate();
-    Ok(config)
+    Config::load_or_create(&paths.config_file()).map_err(Into::into)
 }
 
 fn env_filter(level: &str) -> tracing_subscriber::EnvFilter {
@@ -1180,7 +1566,7 @@ fn init_file_logging(path: &Path, level: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_json(result: &CommandResult) -> Result<()> {
+fn print_json<T: serde::Serialize + ?Sized>(result: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(result)?);
     Ok(())
 }
@@ -1195,6 +1581,9 @@ fn print_result(result: CommandResult) -> Result<()> {
             }
         }
         CommandResult::State(snapshot) => print_state(&snapshot),
+        CommandResult::Playback(playback) => print_playback(&playback),
+        CommandResult::Queue(queue) => print_queue(&queue),
+        CommandResult::Data(value) => print_json(&value)?,
         CommandResult::Auth(auth) => {
             if auth.logged_in {
                 if let Some(profile) = auth.profile {
@@ -1223,15 +1612,7 @@ fn print_result(result: CommandResult) -> Result<()> {
     Ok(())
 }
 
-fn expect_state(result: CommandResult) -> Result<StateSnapshot> {
-    match result {
-        CommandResult::State(snapshot) => Ok(*snapshot),
-        other => Err(anyhow!("unexpected daemon response: {other:?}")),
-    }
-}
-
 fn print_state(snapshot: &StateSnapshot) {
-    let p = &snapshot.playback;
     match &snapshot.auth.profile {
         Some(profile) if snapshot.auth.logged_in => {
             println!("Account: {} ({})", profile.nickname, profile.user_id)
@@ -1239,6 +1620,13 @@ fn print_state(snapshot: &StateSnapshot) {
         _ if snapshot.auth.session_expired => println!("Account: session expired"),
         _ => println!("Account: not logged in"),
     }
+    print_playback(&snapshot.playback);
+    for warning in &snapshot.warnings {
+        println!("Warning: {warning}");
+    }
+}
+
+fn print_playback(p: &yoruplay_protocol::PlaybackState) {
     if let Some(song) = &p.current {
         println!(
             "Track:   {} — {} [{}]",
@@ -1269,49 +1657,54 @@ fn print_state(snapshot: &StateSnapshot) {
         println!("Source:  {} [{}]", playlist.name, playlist.id);
     }
     println!(
-        "Volume:  {:.0}%   mpv: {}",
+        "Volume:  {:.0}%   audio: {}",
         p.volume * 100.0,
-        if p.mpv_available {
+        if p.audio_available {
             "available"
         } else {
             "missing/stopped"
         }
     );
+    if let Some(source) = &p.audio_source {
+        println!(
+            "Audio source: {source}; actual quality: {}",
+            p.actual_quality.as_deref().unwrap_or("unknown")
+        );
+    }
     if let Some(error) = &p.error {
         println!("Error:   {error}");
     }
     if let Some(warning) = &p.warning {
         println!("Warning: {warning}");
     }
-    for warning in &snapshot.warnings {
-        println!("Warning: {warning}");
-    }
 }
 
-fn print_queue(snapshot: &StateSnapshot) {
-    if snapshot.queue.items.is_empty() {
+fn print_queue(queue: &yoruplay_protocol::QueueSnapshot) {
+    if queue.items.is_empty() {
         println!("Queue is empty.");
         return;
     }
-    for (index, item) in snapshot.queue.items.iter().enumerate() {
-        let marker = if Some(index) == snapshot.queue.current {
+    for (index, item) in queue.items.iter().enumerate() {
+        let marker = if Some(queue.offset + index) == queue.current {
             ">"
         } else {
             " "
         };
         println!(
             "{marker} {:>4}  {} — {} [{}]",
-            index,
+            queue.offset + index,
             item.song.name,
             item.song.artist_text(),
             item.song.id
         );
     }
     println!(
-        "{} tracks, mode {}, source {}",
-        snapshot.queue.items.len(),
-        snapshot.queue.mode.short(),
-        queue_source(&snapshot.queue.source)
+        "{} total tracks, page offset {}, revision {}, mode {}, source {}",
+        queue.total,
+        queue.offset,
+        queue.revision,
+        queue.mode.short(),
+        queue_source(&queue.source)
     );
 }
 
@@ -1458,10 +1851,58 @@ fn parse_search_kind(value: &str) -> Result<SearchKind> {
 }
 
 fn tail_file(path: &Path, lines: usize) -> io::Result<String> {
-    let text = fs::read_to_string(path)?;
-    let mut all: Vec<&str> = text.lines().collect();
-    if all.len() > lines {
-        all = all.split_off(all.len() - lines);
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+    if lines == 0 {
+        return Ok(String::new());
     }
-    Ok(all.join("\n"))
+    let mut file = fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let start = length.saturating_sub(MAX_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((length - start) as usize);
+    file.take(MAX_TAIL_BYTES).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start > 0 {
+        text.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    } else {
+        &text
+    };
+    let text = text.trim_end_matches('\n');
+    let begin = text
+        .char_indices()
+        .rev()
+        .filter(|(_, ch)| *ch == '\n')
+        .nth(lines - 1)
+        .map(|(index, _)| index + 1)
+        .unwrap_or(0);
+    Ok(text[begin..].to_string())
+}
+
+#[cfg(test)]
+mod tail_file_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn tails_exactly_the_requested_number_of_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("log");
+        for text in ["first\nsecond\nlast", "first\nsecond\nlast\n"] {
+            fs::write(&path, text).unwrap();
+            assert_eq!(tail_file(&path, 1).unwrap(), "last");
+            assert_eq!(tail_file(&path, 2).unwrap(), "second\nlast");
+            assert_eq!(tail_file(&path, 0).unwrap(), "");
+        }
+    }
+
+    #[test]
+    fn large_logs_are_read_from_a_bounded_tail_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.log");
+        let mut file = fs::File::create(&path).unwrap();
+        file.seek(SeekFrom::Start(16 * 1024 * 1024)).unwrap();
+        file.write_all(b"\nlast\n").unwrap();
+        assert_eq!(tail_file(&path, 1).unwrap(), "last");
+        assert!(tail_file(&path, usize::MAX).unwrap().len() <= 64 * 1024);
+    }
 }

@@ -328,6 +328,8 @@ pub struct PlaySource {
     pub playlist: Option<PlaylistRef>,
     #[serde(default)]
     pub personal_fm: bool,
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 impl Default for PlaySource {
@@ -341,18 +343,21 @@ impl PlaySource {
         Self {
             playlist: None,
             personal_fm: false,
+            local_only: false,
         }
     }
     pub fn playlist(p: PlaylistRef) -> Self {
         Self {
             playlist: Some(p),
             personal_fm: false,
+            local_only: false,
         }
     }
     pub fn personal_fm() -> Self {
         Self {
             playlist: None,
             personal_fm: true,
+            local_only: false,
         }
     }
 }
@@ -363,6 +368,12 @@ pub struct QueueSnapshot {
     pub current: Option<usize>,
     pub source: PlaySource,
     pub mode: PlayMode,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,7 +393,11 @@ pub struct PlaybackState {
     #[serde(default)]
     pub warning: Option<String>,
     #[serde(default)]
-    pub mpv_available: bool,
+    pub audio_available: bool,
+    #[serde(default)]
+    pub audio_source: Option<String>,
+    #[serde(default)]
+    pub actual_quality: Option<String>,
     #[serde(default)]
     pub url_refreshed_at_ms: Option<u64>,
 }
@@ -402,7 +417,7 @@ pub struct StateSnapshot {
     pub playback: PlaybackState,
     pub queue: QueueSnapshot,
     pub auth: AuthState,
-    /// Non-fatal startup diagnostics (missing mpv, MPRIS registration failure,
+    /// Non-fatal startup diagnostics (audio device, MPRIS registration failure,
     /// corrupt state file that was ignored, ...).
     #[serde(default)]
     pub warnings: Vec<String>,

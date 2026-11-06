@@ -4,6 +4,7 @@
 //! stop, previous after a random jump, heartbeat context) unit-testable.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use rand::Rng;
 use yoruplay_protocol::{PlayMode, PlaySource, PlaylistRef, QueueItem, QueueSnapshot, Song};
@@ -37,7 +38,8 @@ pub enum QueueError {
 
 #[derive(Debug, Clone)]
 pub struct Queue {
-    items: Vec<QueueItem>,
+    items: Arc<Vec<QueueItem>>,
+    revision: u64,
     current: Option<usize>,
     mode: PlayMode,
     source: PlaySource,
@@ -49,7 +51,8 @@ pub struct Queue {
 impl Queue {
     pub fn new(mode: PlayMode) -> Self {
         Self {
-            items: Vec::new(),
+            items: Arc::new(Vec::new()),
+            revision: 0,
             current: None,
             mode,
             source: PlaySource::none(),
@@ -61,6 +64,18 @@ impl Queue {
 
     pub fn items(&self) -> &[QueueItem] {
         &self.items
+    }
+
+    pub fn shared_items(&self) -> Arc<Vec<QueueItem>> {
+        self.items.clone()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
     }
 
     pub fn len(&self) -> usize {
@@ -96,11 +111,20 @@ impl Queue {
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
+        self.snapshot_page(0, self.items.len())
+    }
+
+    pub fn snapshot_page(&self, offset: usize, limit: usize) -> QueueSnapshot {
+        let offset = offset.min(self.items.len());
+        let end = offset.saturating_add(limit).min(self.items.len());
         QueueSnapshot {
-            items: self.items.clone(),
+            items: self.items[offset..end].to_vec(),
             current: self.current,
             source: self.source.clone(),
             mode: self.mode,
+            offset,
+            total: self.items.len(),
+            revision: self.revision,
         }
     }
 
@@ -131,7 +155,8 @@ impl Queue {
         start_index: usize,
         source: PlaySource,
     ) -> Option<usize> {
-        self.items = items;
+        self.items = Arc::new(items);
+        self.revision = self.revision.saturating_add(1);
         self.source = source;
         self.history.clear();
         self.shuffle_recent.clear();
@@ -150,7 +175,10 @@ impl Queue {
 
     pub fn append(&mut self, items: impl IntoIterator<Item = QueueItem>) {
         let before = self.items.len();
-        self.items.extend(items);
+        Arc::make_mut(&mut self.items).extend(items);
+        if self.items.len() != before {
+            self.revision = self.revision.saturating_add(1);
+        }
         if self.current.is_none() && self.items.len() > before {
             // Adding to an empty, stopped queue does not start playback. The
             // first item becomes the selected item so Play has a target.
@@ -165,7 +193,8 @@ impl Queue {
             Some(i) => (i + 1).min(self.items.len()),
             None => self.items.len(),
         };
-        self.items.insert(pos, item);
+        Arc::make_mut(&mut self.items).insert(pos, item);
+        self.revision = self.revision.saturating_add(1);
         if let Some(current) = self.current {
             if current != pos {
                 self.push_history(current);
@@ -246,25 +275,33 @@ impl Queue {
         if len <= 1 {
             return 0;
         }
-        let current = self.current;
-        let memory = SHUFFLE_MEMORY.min(len.saturating_sub(1));
-        let recent: Vec<usize> = self
-            .shuffle_recent
-            .iter()
-            .rev()
-            .take(memory)
-            .copied()
-            .collect();
-        let mut candidates: Vec<usize> = (0..len)
-            .filter(|i| Some(*i) != current && !recent.contains(i))
-            .collect();
-        if candidates.is_empty() {
-            candidates = (0..len).filter(|i| Some(*i) != current).collect();
+        let memory = SHUFFLE_MEMORY.min(len - 1);
+        let mut excluded = [0usize; SHUFFLE_MEMORY + 1];
+        let mut count = 0;
+        if let Some(current) = self.current {
+            excluded[count] = current;
+            count += 1;
         }
-        if candidates.is_empty() {
-            candidates.push(current.unwrap_or(0).min(len - 1));
+        for index in self.shuffle_recent.iter().rev().take(memory).copied() {
+            if index < len && !excluded[..count].contains(&index) {
+                excluded[count] = index;
+                count += 1;
+            }
         }
-        let chosen = candidates[rng.gen_range(0..candidates.len())];
+        if count >= len {
+            count = 0;
+            if let Some(current) = self.current {
+                excluded[0] = current;
+                count = 1;
+            }
+        }
+        excluded[..count].sort_unstable();
+        let mut chosen = rng.gen_range(0..len - count);
+        for index in &excluded[..count] {
+            if chosen >= *index {
+                chosen += 1;
+            }
+        }
         if self.shuffle_recent.len() >= memory.max(1) {
             self.shuffle_recent.pop_front();
         }
@@ -308,7 +345,8 @@ impl Queue {
             return Err(QueueError::IndexOutOfRange(index));
         }
         let was_current = self.current == Some(index);
-        self.items.remove(index);
+        Arc::make_mut(&mut self.items).remove(index);
+        self.revision = self.revision.saturating_add(1);
         self.history.clear();
         self.shuffle_recent.clear();
         if self.items.is_empty() {
@@ -335,7 +373,8 @@ impl Queue {
     }
 
     pub fn clear(&mut self) {
-        self.items.clear();
+        self.items = Arc::new(Vec::new());
+        self.revision = self.revision.saturating_add(1);
         self.current = None;
         self.history.clear();
         self.shuffle_recent.clear();

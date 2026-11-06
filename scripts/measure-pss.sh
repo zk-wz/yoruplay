@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Summarise the YoruPlay daemon, TUI and mpv children by PSS. Pass PIDs or let
+# Summarise the YoruPlay daemon, TUI and optional extra processes by PSS. Pass PIDs or let
 # the script find matching processes.
 set -euo pipefail
 

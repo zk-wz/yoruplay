@@ -1,5 +1,9 @@
 # YoruPlay 最终交付报告
 
+> 历史报告：本文记录 2026-11-01 的 mpv 版本验收，不代表当前运行时。
+> Rust 播放、音频缓存与配置 CLI 的现状见 `architecture.md`、
+> `song-cache.md`、`resource-usage.md`；下文旧测量与提交记录仅保留为历史证据。
+
 日期：2026-11-01  
 目标：Arch Linux / Surface Pro 6 / Niri + Noctalia / PipeWire  
 仓库：`~/Projects/yoruplay`

@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/api",
     "crates/protocol",
@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "MIT"
 authors = ["YoruPlay contributors"]
 
@@ -28,12 +28,12 @@ num-bigint = "0.4"
 percent-encoding = "2"
 rand = "0.8"
 ratatui = "0.29"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "http2"] }
-serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "http2", "stream"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 toml = "0.8"
 tempfile = "3"
 termtree = "0.4"
@@ -43,6 +43,13 @@ unicode-width = "0.2"
 zbus = { version = "5", features = ["tokio"] }
 aes = "0.8"
 cbc = "0.1"
+rodio = { version = "=0.22.2", default-features = false, features = ["playback", "symphonia-aac", "symphonia-flac", "symphonia-isomp4", "symphonia-mp3", "symphonia-ogg", "symphonia-vorbis", "symphonia-wav", "symphonia-pcm"] }
+symphonia = { version = "=0.5.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav", "pcm"] }
+rtrb = "0.3"
+redb = "=2.4.0"
+lofty = "0.22"
+rustix = { version = "1", features = ["fs"] }
+toml_edit = { version = "0.22", features = ["serde"] }
 
 [profile.release]
 lto = "thin"

@@ -8,8 +8,8 @@ daemon:
 - **TUI** (Ratatui + Crossterm) for browsing and selecting music.
 - **CLI** for scripting and day-to-day control.
 - **MPRIS** for Noctalia Media and other Linux desktop media controllers.
-- **Core daemon** (`yoruplay daemon start`) owns the queue, NetEase session, stream
-  URLs and the system `mpv` child process.
+- **Core daemon** (`yoruplay daemon start`) owns the queue, NetEase session,
+  native Rust audio engine and disk-backed audio cache.
 
 The TUI exits without stopping playback. Reopen it later and it reconnects to
 the same daemon and queue.
@@ -25,13 +25,16 @@ the same daemon and queue.
 - Search songs, artists, albums and playlists with pagination.
 - Five modes: list repeat, track repeat, sequential, shuffle with short-repeat
   avoidance, and NetEase Heartbeat (心动模式) with playlist context.
-- System `mpv` controlled only through JSON IPC; PulseAudio output through
-  pipewire-pulse; `DISABLE_RTKIT=1` for the mpv child.
+- Symphonia decoding on a worker, bounded PCM ring, rodio/cpal output through
+  the system's shared ALSA/PipeWire/Pulse route; no mpv dependency.
 - MPRIS 2.2 (`org.mpris.MediaPlayer2.yoruplay`), including metadata, cover,
   position in microseconds, seek, volume, loop/shuffle mapping and plain-text
   lyrics in `xesam:asText`.
-- Bounded on-disk cache, atomic state persistence, protected Unix socket,
-  single-instance daemon, protected IPC socket, graceful shutdown.
+- Native-format audio cache: playback's own transfer, local-first zero-network
+  replay, 10 GiB FIFO budget, explicit CLI quality upgrades and immediate
+  anonymous-staging cleanup.
+- Configurable failure retries (three after the initial attempt, ten seconds
+  apart), atomic configuration/state, protected Unix IPC and graceful shutdown.
 - English/Chinese UI labels (`ui.language = "en" | "zh"`).
 
 ## Requirements
@@ -39,10 +42,10 @@ the same daemon and queue.
 Arch Linux:
 
 ```sh
-sudo pacman -S mpv pipewire pipewire-pulse wireplumber sqlite
+sudo pacman -S alsa-lib pkgconf pipewire pipewire-alsa pipewire-pulse wireplumber sqlite
 ```
 
-Rust stable (1.85+) is enough to build. No root privileges are needed at
+Rust stable (1.87+) is enough to build with the committed lockfile. No root privileges are needed at
 runtime. Do not run the daemon or TUI as root.
 
 YoruPlay expects a working user D-Bus session and PipeWire/PulseAudio socket.
@@ -55,7 +58,7 @@ cargo build --release
 install -Dm755 target/release/yoruplay ~/.local/bin/yoruplay
 ```
 
-Or use the helper, which checks mpv and installs the binary:
+Or use the helper, which checks ALSA development support and installs the binary:
 
 ```sh
 ./scripts/install.sh
@@ -83,8 +86,8 @@ Stop the background daemon at any time:
 yoruplay daemon stop
 ```
 
-This sends a graceful IPC shutdown, saves the queue and reaps mpv. It is
-idempotent when nothing is running. `yoruplay control stop` only stops playback.
+This sends a graceful IPC shutdown, saves the queue and releases audio/transfer
+resources. It is idempotent when nothing is running. `yoruplay control stop` only stops playback.
 Closing the TUI with `q` does not stop the daemon.
 
 ## First login
@@ -132,7 +135,7 @@ yoruplay auth login --cookie-stdin < ~/netease-cookie.txt
 The header must contain `MUSIC_U=...`; `__csrf=...` is recommended. Do not put
 cookies in shell history or chat. YoruPlay only accepts stdin for this reason.
 Credentials are stored in `$XDG_DATA_HOME/yoruplay/auth.json` with mode `0600`;
-the runtime directory is `0700` and the IPC/mpv sockets are `0600`.
+the runtime directory is `0700` and the IPC socket is `0600`.
 
 Full details, the Firefox profile list and the manual extraction procedure are
 in [`docs/login.md`](docs/login.md).
@@ -175,7 +178,8 @@ Common keys:
 | `q` | Close TUI only |
 
 On narrow terminals the two-pane layout folds into one column. Large queues and
-playlists are rendered as a virtual viewport; only visible rows are built.
+playlists use 100-item pages and a virtual viewport. Opening the TUI does not
+automatically fetch daily recommendations; select or refresh an online view explicitly.
 
 CLI examples:
 
@@ -192,6 +196,8 @@ yoruplay control mode             # cycle modes
 yoruplay control volume 65
 yoruplay control seek +10
 yoruplay queue list
+yoruplay queue list --offset 100 --limit 100
+yoruplay queue play-cache 123456
 yoruplay search "晴天" --kind songs
 yoruplay library playlist 3778678
 yoruplay queue start-playlist 3778678 --start 0
@@ -203,6 +209,18 @@ yoruplay library fm
 yoruplay library liked
 yoruplay library recent
 yoruplay cache clear
+yoruplay cache info
+yoruplay cache list
+yoruplay cache clear --audio         # metadata-only without this flag
+yoruplay cache clear --all           # audio + metadata; never logs
+yoruplay cache upgrade 123456 --quality lossless
+yoruplay config list
+yoruplay config get cache.audio.max_gb
+yoruplay config set cache.audio.max_gb 10G
+yoruplay config set playback.retry_count 3
+yoruplay config set playback.retry_interval_secs 10
+yoruplay config reset playback.retry_count
+yoruplay listpath
 yoruplay doctor
 ```
 
@@ -215,11 +233,12 @@ yoruplay --json search "Jay" --kind artists
 
 ## MPRIS / Noctalia
 
-The daemon is the only MPRIS owner; mpv does not register a second player.
+The daemon is the only MPRIS owner; no separate audio-player process is started.
 Use Noctalia Media or any MPRIS client to play/pause, seek, change volume and
-skip tracks. Metadata includes title, artists, album, cover URL, duration,
-stable track ID and the current plain-text lyrics (`xesam:asText`) when
-available. Lyrics failures never affect playback.
+skip tracks. Metadata includes title, artists, album, cover, duration, stable
+track ID and current plain-text lyrics (`xesam:asText`) when available. Local
+playback exposes only locally stored artwork/lyrics; missing metadata never
+triggers a network fetch. Lyrics failures never affect playback.
 
 MPRIS loop/shuffle is only an approximation for the five internal modes:
 
@@ -236,14 +255,19 @@ standard MPRIS because MPRIS has no such property; use the TUI/CLI.
 
 ## Configuration and data
 
-XDG paths:
+`yoruplay listpath` shows every managed directory/file pattern, configured and
+active audio paths, and whether each path exists. Read-only config/listpath/cache
+inspection does not create missing files or start a daemon.
 
 ```text
 ~/.config/yoruplay/config.toml
 ~/.local/share/yoruplay/auth.json       # 0600
-~/.local/share/yoruplay/state.json      # 0600, queue/restore state
-~/.cache/yoruplay/                      # bounded cache + logs
-$XDG_RUNTIME_DIR/yoruplay/              # 0700: socket, lock, mpv socket
+~/.local/share/yoruplay/state.json      # compact restore state, 0600
+~/.local/share/yoruplay/queue-*.json     # versioned queue, 0600
+~/.cache/yoruplay/metadata/            # independent TTL JSON cache
+~/.cache/yoruplay/audio/               # native audio, manifests, artwork, index
+~/.cache/yoruplay/{yoruplay,tui}.log
+$XDG_RUNTIME_DIR/yoruplay/             # 0700: IPC socket and daemon lock
 ```
 
 Default config:
@@ -260,20 +284,58 @@ language = "en"          # en | zh
 default_mode = "list_loop"
 volume = 0.7
 restore_queue = true
+audio_device = ""        # auto shared route; explicit device must exist
+prebuffer_kb = 256       # KiB
+read_ahead_kb = 512      # compressed KiB, demand-driven
+pcm_buffer_ms = 100
+scratch_mb = 8           # bounded nonpersistent disk window
+retry_count = 3         # retries AFTER the initial attempt
+retry_interval_secs = 10
 
 [cache]
 max_mb = 32
 lyrics_ttl_hours = 720
 
+[cache.audio]
+enabled = true
+max_gb = 10.0           # GiB; CLI accepts 10 or 10G
+dir = ""               # default audio/ above; custom paths must be absolute
+
 [log]
 level = "info"
 ```
 
-Daily recommendations and lyrics are cached briefly (6 hours for daily data,
-configurable TTL for lyrics); no audio files are cached yet. `yoruplay cache
-clear` removes the metadata cache. A song cache is designed but not implemented;
-see [`docs/song-cache.md`](docs/song-cache.md). The daemon trims cache files to
-`cache.max_mb` after writes.
+Audio is cached only from bytes acquired for playback, without an independent
+downloader. Only complete, verified non-trial objects become offline files, in
+their original MP3/FLAC/M4A/AAC/Ogg/WAV format. Abandoned playback is not completed
+in the background. Incomplete data lives in Linux anonymous files: no named
+`.part` survives Stop, cancellation or process death. The cache filesystem must
+support `O_TMPFILE` and unprivileged link publication; `doctor` checks this.
+
+Complete entries are preferred even after `api.quality` changes. Only
+`cache upgrade` deliberately resolves/downloads a replacement. Cached playback
+does not validate accounts or fetch URLs, lyrics or artwork; local-only queues
+also stop automatic online recommendations. Trial-only URLs are skipped before
+the media request. An ordinary online queue can still download its next uncached
+track; `queue play-cache` selects a strictly local source.
+
+FIFO eviction uses completion time, not last play time. A pinned source may
+temporarily keep the cache over budget after a limit reduction; `cache info`
+reports pins, reservations, scratch, index and over-budget bytes. Explicit
+`cache clear --audio` unlinks entries while an already open source can finish;
+in-flight transfers cannot republish them. Avoid tmpfs/ramfs cache paths: their
+downloaded bytes consume RAM rather than disk, and the daemon/doctor warn.
+
+Daily responses and lyrics remain under the independent 32 MiB metadata budget.
+`cache clear` removes only that metadata; `--audio` and `--all` are explicit.
+Logs are never cache-clear/trim targets. See [audio-cache design](docs/song-cache.md).
+
+`config list/get` show types, units, defaults and application policy. Setters
+preserve comments and serialize concurrent writes. Disk persistence and daemon
+reload results are reported separately. Directory/API-timeout/log changes need
+a daemon restart; source buffering/retry changes apply to the next source.
+`ui.language` applies when the TUI restarts. Existing restored mode/volume take
+precedence over startup defaults. `config reset --all --yes` resets every registered key.
 
 The JSON cache and state files are written atomically. A corrupt state file is
 moved aside as `state.json.corrupt-<timestamp>` so the daemon can still start.
@@ -332,10 +394,11 @@ Live read-only API checks (low frequency):
 cargo test -p yoruplay-api --test live_smoke -- --ignored --nocapture
 ```
 
-The integration tests spawn the real daemon with isolated XDG directories and
-exercise two simultaneous IPC clients, event fan-out, permissions, single
-instance enforcement and graceful shutdown. The mpv test uses `--ao=null` and a
-generated silent WAV; normal playback uses `--ao=pulse`.
+Integration tests spawn real daemons with isolated XDG directories and exercise
+IPC, permissions, ownership, single-instance enforcement and graceful shutdown.
+Transport regressions use local HTTP fault servers; decoder tests do not require
+an output device. Real shared-device/CLI/TUI/MPRIS smoke evidence and limitations
+are recorded in `docs/resource-usage.md` and `docs/known-issues.md`.
 
 ## Documentation
 
@@ -346,7 +409,7 @@ generated silent WAV; normal playback uses `--ao=pulse`.
 - [`docs/known-issues.md`](docs/known-issues.md)
 
 `scripts/measure-pss.sh [pid...]` prints PSS/RSS/threads/CPU for the daemon, TUI
-and any passed mpv PID.
+and any additional process IDs.
 
 The NetEase API implementation is a selective native Rust port of
 NeteaseCloudMusicApiEnhanced/api-enhanced (MIT). The upstream checkout under

@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use yoruplay_ipc::IpcClient;
 use yoruplay_protocol::{
     AuthState, Command, CommandResult, ErrorInfo, Event, Language, NoticeLevel, PlayMode,
@@ -179,10 +182,18 @@ pub struct ConfirmState {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PlaylistPage {
+    pub id: u64,
+    pub offset: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone)]
 pub enum RequestKind {
     InitialState,
     RefreshState,
+    QueuePage,
     DailySongs {
         refresh: bool,
     },
@@ -195,6 +206,8 @@ pub enum RequestKind {
     PlaylistTracks {
         id: u64,
         title: String,
+        selected: usize,
+        generation: u64,
     },
     LikedSongs,
     RecentSongs,
@@ -227,6 +240,7 @@ pub enum RequestKind {
 pub struct UiResponse {
     pub kind: RequestKind,
     pub result: Result<CommandResult, ErrorInfo>,
+    pub generation: Option<u64>,
 }
 
 pub struct App {
@@ -254,6 +268,15 @@ pub struct App {
     pub need_daily_after_login: bool,
     client: Arc<IpcClient>,
     responses: mpsc::Sender<UiResponse>,
+    requests: Arc<Semaphore>,
+    urgent_requests: Arc<Semaphore>,
+    browse_requests: Arc<Semaphore>,
+    queue_loading: bool,
+    queue_wanted_revision: u64,
+    pub playlist_page: Option<PlaylistPage>,
+    playlist_generation: u64,
+    content_generation: AtomicU64,
+    content_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl App {
@@ -278,6 +301,9 @@ impl App {
                 current: None,
                 source: PlaySource::none(),
                 mode: PlayMode::ListLoop,
+                offset: 0,
+                total: 0,
+                revision: 0,
             },
             playback: default_playback(),
             auth: AuthState {
@@ -298,9 +324,18 @@ impl App {
             width: 100,
             height: 30,
             search_generation: 0,
-            need_daily_after_login: true,
+            need_daily_after_login: false,
             client,
             responses,
+            requests: Arc::new(Semaphore::new(4)),
+            urgent_requests: Arc::new(Semaphore::new(2)),
+            browse_requests: Arc::new(Semaphore::new(2)),
+            queue_loading: false,
+            queue_wanted_revision: 0,
+            playlist_page: None,
+            playlist_generation: 0,
+            content_generation: AtomicU64::new(0),
+            content_task: Mutex::new(None),
         }
     }
 
@@ -313,12 +348,107 @@ impl App {
     }
 
     fn send(&self, kind: RequestKind, command: Command) {
+        let content = matches!(
+            &kind,
+            RequestKind::DailySongs { .. }
+                | RequestKind::DailyPlaylists { .. }
+                | RequestKind::Playlists { .. }
+                | RequestKind::PlaylistTracks { .. }
+                | RequestKind::LikedSongs
+                | RequestKind::RecentSongs
+                | RequestKind::Radar { .. }
+                | RequestKind::ArtistSongs { .. }
+                | RequestKind::AlbumSongs { .. }
+                | RequestKind::Search { .. }
+        );
+        let generation = content.then(|| self.invalidate_content());
+        let admission = if matches!(&command, Command::Stop | Command::Next) {
+            &self.urgent_requests
+        } else {
+            &self.requests
+        };
+        let Ok(permit) = admission.clone().try_acquire_owned() else {
+            let _ = self.responses.try_send(UiResponse {
+                kind,
+                generation,
+                result: Err(ErrorInfo::new("busy", "Wait for the current operation.")),
+            });
+            return;
+        };
+        let browse = !matches!(
+            &kind,
+            RequestKind::Generic { .. }
+                | RequestKind::QueuePage
+                | RequestKind::InitialState
+                | RequestKind::RefreshState
+        );
+        let browse_permit = if browse {
+            match self.browse_requests.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let _ = self.responses.try_send(UiResponse {
+                        kind,
+                        generation,
+                        result: Err(ErrorInfo::new("busy", "Wait for the current page to load.")),
+                    });
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let client = self.client.clone();
         let tx = self.responses.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            let _browse_permit = browse_permit;
             let result = client.request(command).await;
-            let _ = tx.send(UiResponse { kind, result }).await;
+            let _ = tx
+                .send(UiResponse {
+                    kind,
+                    result,
+                    generation,
+                })
+                .await;
         });
+        if content {
+            *self.content_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        }
+    }
+
+    fn invalidate_content(&self) -> u64 {
+        let generation = self
+            .content_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        if let Some(task) = self
+            .content_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+        generation
+    }
+
+    fn refresh_queue_page(&mut self) {
+        if self.queue_loading {
+            return;
+        }
+        let selected = if let Detail::Queue { selected } = self.detail {
+            selected
+        } else {
+            return;
+        };
+        self.queue_loading = true;
+        self.send(
+            RequestKind::QueuePage,
+            Command::GetQueue {
+                offset: selected / 100 * 100,
+                limit: 100,
+            },
+        );
     }
 
     pub fn set_status(&mut self, level: NoticeLevel, text: impl Into<String>) {
@@ -344,16 +474,16 @@ impl App {
             Event::Playback(playback) => {
                 let status_changed = self.playback.status != playback.status;
                 self.playback = *playback;
+                self.queue.current = self.playback.current_index;
+                self.queue.total = self.playback.queue_len;
                 if status_changed {
                     self.dirty = true;
                 }
                 self.dirty = true;
             }
-            Event::Queue(queue) => {
-                self.queue = *queue;
-                if let Detail::Queue { selected } = &mut self.detail {
-                    *selected = (*selected).min(self.queue.items.len().saturating_sub(1));
-                }
+            Event::QueueChanged { revision } => {
+                self.queue_wanted_revision = self.queue_wanted_revision.max(revision);
+                self.refresh_queue_page();
                 self.dirty = true;
             }
             Event::Auth(auth) => {
@@ -388,7 +518,16 @@ impl App {
     }
 
     pub fn handle_response(&mut self, response: UiResponse) {
-        let UiResponse { kind, result } = response;
+        let UiResponse {
+            kind,
+            result,
+            generation,
+        } = response;
+        if generation
+            .is_some_and(|generation| generation != self.content_generation.load(Ordering::Relaxed))
+        {
+            return;
+        }
         match kind {
             RequestKind::InitialState => match result {
                 Ok(CommandResult::State(snapshot)) => {
@@ -411,6 +550,28 @@ impl App {
             RequestKind::RefreshState => {
                 if let Ok(CommandResult::State(snapshot)) = result {
                     self.apply_snapshot(*snapshot);
+                }
+            }
+            RequestKind::QueuePage => {
+                self.queue_loading = false;
+                match result {
+                    Ok(CommandResult::Queue(queue)) => {
+                        self.queue = *queue;
+                        if let Detail::Queue { selected } = &mut self.detail {
+                            *selected = (*selected).min(self.queue.total.saturating_sub(1));
+                        }
+                        let outside = matches!(self.detail, Detail::Queue { selected }
+                            if selected < self.queue.offset ||
+                            selected >= self.queue.offset.saturating_add(self.queue.items.len()));
+                        if self.queue.revision < self.queue_wanted_revision
+                            || outside && self.queue.total > 0
+                        {
+                            self.refresh_queue_page();
+                        }
+                        self.dirty = true;
+                    }
+                    Err(error) => self.status_error(error),
+                    Ok(other) => self.show_unexpected(other),
                 }
             }
             RequestKind::DailySongs { .. } => match result {
@@ -458,8 +619,21 @@ impl App {
                 Ok(other) => self.show_unexpected(other),
                 Err(error) => self.status_error(error),
             },
-            RequestKind::PlaylistTracks { id, title } => match result {
+            RequestKind::PlaylistTracks {
+                id,
+                title,
+                selected,
+                generation,
+            } => match result {
                 Ok(CommandResult::PlaylistTracks(tracks)) => {
+                    if generation != self.playlist_generation {
+                        return;
+                    }
+                    self.playlist_page = Some(PlaylistPage {
+                        id,
+                        offset: tracks.offset,
+                        total: tracks.total,
+                    });
                     let context = Some(PlaylistRef {
                         id: tracks.playlist.id,
                         name: tracks.playlist.name.clone(),
@@ -472,7 +646,7 @@ impl App {
                             context,
                         },
                         origin: SongsOrigin::Playlist(id),
-                        selected: 0,
+                        selected: selected.saturating_sub(tracks.offset),
                     };
                     self.focus = Focus::Detail;
                     if self.detail.title().is_empty() {
@@ -679,6 +853,7 @@ impl App {
     pub fn apply_snapshot(&mut self, snapshot: StateSnapshot) {
         self.playback = snapshot.playback;
         self.queue = snapshot.queue;
+        self.queue_wanted_revision = self.queue.revision;
         self.auth = snapshot.auth;
         self.warnings = snapshot.warnings;
         self.dirty = true;
@@ -984,7 +1159,18 @@ impl App {
             }
             self.menu_index = index as usize;
         } else {
-            let max = self.detail.len(self.queue.items.len());
+            if let Some(page) = self.playlist_page {
+                if matches!(self.detail, Detail::Songs { origin: SongsOrigin::Playlist(id), .. } if id == page.id)
+                {
+                    let current = page.offset.saturating_add(self.detail.selected());
+                    let next = (current as isize + delta)
+                        .clamp(0, page.total.saturating_sub(1) as isize)
+                        as usize;
+                    self.select_playlist_track(next);
+                    return;
+                }
+            }
+            let max = self.detail.len(self.queue.total);
             if max == 0 {
                 return;
             }
@@ -992,34 +1178,60 @@ impl App {
             let next = (current + delta).clamp(0, max as isize - 1) as usize;
             self.detail.set_selected(next);
             self.maybe_load_more_search();
+            if matches!(self.detail, Detail::Queue { selected }
+                if selected < self.queue.offset ||
+                selected >= self.queue.offset.saturating_add(self.queue.items.len()))
+            {
+                self.refresh_queue_page();
+            }
         }
         self.dirty = true;
     }
 
     fn move_to_start(&mut self) {
+        if self.focus == Focus::Detail && self.select_playlist_track(0) {
+            return;
+        }
         if self.focus == Focus::Menu {
             if let Some(index) = self.menu.iter().position(|entry| entry.action.is_some()) {
                 self.menu_index = index;
             }
         } else {
             self.detail.set_selected(0);
+            self.refresh_queue_page();
         }
         self.dirty = true;
     }
 
     fn move_to_end(&mut self) {
+        if self.focus == Focus::Detail {
+            if let Some(page) = self.playlist_page {
+                if self.select_playlist_track(page.total.saturating_sub(1)) {
+                    return;
+                }
+            }
+        }
         if self.focus == Focus::Menu {
             if let Some(index) = self.menu.iter().rposition(|entry| entry.action.is_some()) {
                 self.menu_index = index;
             }
         } else {
-            self.detail.set_selected(usize::MAX);
+            self.detail
+                .set_selected(if matches!(self.detail, Detail::Queue { .. }) {
+                    self.queue.total.saturating_sub(1)
+                } else {
+                    usize::MAX
+                });
+            self.refresh_queue_page();
             self.maybe_load_more_search();
         }
         self.dirty = true;
     }
 
     fn activate_menu(&mut self) {
+        self.invalidate_content();
+        self.playlist_generation = self.playlist_generation.wrapping_add(1);
+        self.playlist_page = None;
         let Some(action) = self
             .menu
             .get(self.menu_index)
@@ -1056,7 +1268,10 @@ impl App {
             }
             MenuAction::Search => self.open_search_input(),
             MenuAction::Queue => {
-                self.detail = Detail::Queue { selected: 0 };
+                self.detail = Detail::Queue {
+                    selected: self.playback.current_index.unwrap_or(0),
+                };
+                self.refresh_queue_page();
                 self.focus = Focus::Detail;
                 self.dirty = true;
             }
@@ -1075,11 +1290,19 @@ impl App {
                     return;
                 }
                 let index = (*selected).min(view.songs.len() - 1);
-                let command = Command::PlaySongs {
-                    songs: view.songs.clone(),
-                    start_index: index,
-                    context: view.context.clone(),
-                    title: Some(view.title.clone()),
+                let command = if let Some(context) = &view.context {
+                    Command::StartPlaylist {
+                        id: context.id,
+                        start_index: 0,
+                        start_song_id: Some(view.songs[index].id),
+                    }
+                } else {
+                    Command::PlaySongs {
+                        songs: view.songs.clone(),
+                        start_index: index,
+                        context: None,
+                        title: Some(view.title.clone()),
+                    }
                 };
                 self.send(
                     RequestKind::Generic {
@@ -1137,7 +1360,7 @@ impl App {
                 }
             }
             Detail::Queue { selected } => {
-                if *selected < self.queue.items.len() {
+                if *selected < self.queue.total {
                     self.send(
                         RequestKind::Generic {
                             label: "Playing queue item".into(),
@@ -1155,6 +1378,9 @@ impl App {
 
     fn add_selected(&mut self, all: bool) {
         let command = match &self.detail {
+            Detail::Songs { view, .. } if all && view.context.is_some() => Command::AddPlaylist {
+                id: view.context.as_ref().expect("checked context").id,
+            },
             Detail::Songs { view, selected, .. } => {
                 if view.songs.is_empty() {
                     return;
@@ -1308,16 +1534,50 @@ impl App {
     }
 
     pub fn load_playlist(&mut self, id: u64, title: String) {
+        self.load_playlist_page(id, title, 0, 0);
+    }
+
+    fn select_playlist_track(&mut self, absolute: usize) -> bool {
+        let Some(page) = self.playlist_page else {
+            return false;
+        };
+        if !matches!(self.detail, Detail::Songs { origin: SongsOrigin::Playlist(id), .. } if id == page.id)
+        {
+            return false;
+        }
+        let selected = absolute.min(page.total.saturating_sub(1));
+        let len = if let Detail::Songs { view, .. } = &self.detail {
+            view.songs.len()
+        } else {
+            0
+        };
+        if selected >= page.offset && selected < page.offset.saturating_add(len) {
+            self.detail.set_selected(selected - page.offset);
+        } else {
+            self.load_playlist_page(page.id, self.detail.title(), selected / 100 * 100, selected);
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn load_playlist_page(&mut self, id: u64, title: String, offset: usize, selected: usize) {
+        self.playlist_generation = self.playlist_generation.wrapping_add(1);
+        let generation = self.playlist_generation;
         self.detail = Detail::Loading {
             title: format!("{} {title}…", tr(self.lang, "Loading", "正在加载")),
         };
         self.focus = Focus::Detail;
         self.send(
-            RequestKind::PlaylistTracks { id, title },
+            RequestKind::PlaylistTracks {
+                id,
+                title,
+                selected,
+                generation,
+            },
             Command::PlaylistTracks {
                 id,
-                offset: 0,
-                limit: 100_000,
+                offset,
+                limit: 100,
             },
         );
     }
@@ -1374,6 +1634,8 @@ impl App {
     }
 
     fn run_search(&mut self, query: String, kind: SearchKind) {
+        self.playlist_generation = self.playlist_generation.wrapping_add(1);
+        self.playlist_page = None;
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
         self.detail = Detail::Search {
@@ -1531,7 +1793,9 @@ pub fn default_playback() -> PlaybackState {
         queue_len: 0,
         error: None,
         warning: None,
-        mpv_available: false,
+        audio_available: false,
+        audio_source: None,
+        actual_quality: None,
         url_refreshed_at_ms: None,
     }
 }

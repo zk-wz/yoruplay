@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "YoruPlay background service: queue, mpv, IPC and MPRIS"
+description = "YoruPlay background service: Rust audio, cache, IPC and MPRIS"
 
 [dependencies]
 anyhow.workspace = true
@@ -23,4 +23,12 @@ tracing-subscriber.workspace = true
 yoruplay-api = { path = "../api" }
 yoruplay-protocol = { path = "../protocol" }
 zbus.workspace = true
+rodio.workspace = true
+symphonia.workspace = true
+rtrb.workspace = true
+redb.workspace = true
+lofty.workspace = true
+rustix.workspace = true
+reqwest.workspace = true
+md-5.workspace = true
 

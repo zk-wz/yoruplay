@@ -4,12 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if ! command -v mpv >/dev/null 2>&1; then
+if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists alsa; then
     cat >&2 <<'MSG'
-YoruPlay requires mpv, but it was not found in PATH.
+YoruPlay's Rust audio backend needs the ALSA development library and pkg-config.
 
-On Arch Linux, install it with:
-  sudo pacman -S mpv
+On Arch Linux, install them with:
+  sudo pacman -S alsa-lib pkgconf
+Use pipewire-alsa or a PulseAudio ALSA route for shared desktop audio.
 MSG
     exit 1
 fi

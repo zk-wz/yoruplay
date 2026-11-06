@@ -59,6 +59,7 @@ pub struct StreamUrl {
     pub bitrate: u64,
     pub format: Option<String>,
     pub size: u64,
+    pub md5: Option<String>,
     pub level: Option<String>,
     pub trial: bool,
 }
@@ -69,6 +70,8 @@ pub struct Lyrics {
     pub translated: Option<String>,
 }
 
+type PlaylistCache = HashMap<u64, (Instant, Arc<RawPlaylist>)>;
+
 #[derive(Clone)]
 pub struct NeteaseClient {
     http: reqwest::Client,
@@ -76,7 +79,7 @@ pub struct NeteaseClient {
     quality: Quality,
     session: Arc<RwLock<SessionData>>,
     startup_warning: Option<String>,
-    playlist_cache: Arc<RwLock<HashMap<u64, (Instant, RawPlaylist)>>>,
+    playlist_cache: Arc<RwLock<PlaylistCache>>,
 }
 
 impl NeteaseClient {
@@ -166,6 +169,15 @@ impl NeteaseClient {
         path: &str,
         payload: Value,
     ) -> Result<Value, ApiError> {
+        self.post_response(mode, path, payload).await
+    }
+
+    async fn post_response<T: serde::de::DeserializeOwned>(
+        &self,
+        mode: CryptoMode,
+        path: &str,
+        payload: Value,
+    ) -> Result<T, ApiError> {
         let request_id = format!("{}_{:04}", now_ms(), rand::thread_rng().gen_range(0..1000));
         let endpoint_path = path
             .strip_prefix("/api/")
@@ -242,7 +254,7 @@ impl NeteaseClient {
         if let Some(referer) = referer {
             builder = builder.header(REFERER, referer);
         }
-        let response = builder.form(&form).send().await.map_err(|e| {
+        let mut response = builder.form(&form).send().await.map_err(|e| {
             if e.is_timeout() {
                 ApiError::Timeout
             } else {
@@ -257,18 +269,29 @@ impl NeteaseClient {
             .filter_map(|v| v.to_str().ok())
             .map(str::to_string)
             .collect();
-        let body = response.text().await.map_err(|e| {
+        const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
+        let mut body =
+            Vec::with_capacity(response.content_length().unwrap_or(8192).min(65536) as usize);
+        while let Some(chunk) = response.chunk().await.map_err(|e| {
             if e.is_timeout() {
                 ApiError::Timeout
             } else {
                 ApiError::Network(e.to_string())
             }
-        })?;
+        })? {
+            if body.len().saturating_add(chunk.len()) > RESPONSE_LIMIT {
+                return Err(ApiError::Decode {
+                    endpoint: path.into(),
+                    message: "response exceeds 16 MiB metadata limit".into(),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
         if !set_cookies.is_empty() {
             let mut session = self.session.write().await;
             session.merge_cookies(set_cookies.iter().map(String::as_str));
         }
-        let parsed = serde_json::from_str::<Value>(&body);
+        let parsed = serde_json::from_slice::<T>(&body);
         match parsed {
             Ok(value) => {
                 if !status.is_success() {
@@ -310,8 +333,25 @@ impl NeteaseClient {
     ) -> Result<Value, ApiError> {
         let value = self.post_json(mode, path, payload).await?;
         let code = json_i64(&value, "code").unwrap_or(200);
+        let message = value
+            .get("message")
+            .or_else(|| value.get("msg"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        self.check_response_code(code, message, path, destructive_auth_failure)
+            .await?;
+        Ok(value)
+    }
+
+    async fn check_response_code(
+        &self,
+        code: i64,
+        message: &str,
+        path: &str,
+        destructive_auth_failure: bool,
+    ) -> Result<(), ApiError> {
         if code == 200 {
-            return Ok(value);
+            return Ok(());
         }
         if code == 301 {
             let mut session = self.session.write().await;
@@ -328,15 +368,9 @@ impl NeteaseClient {
                 ApiError::AuthRequired
             });
         }
-        let message = value
-            .get("message")
-            .or_else(|| value.get("msg"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
         Err(ApiError::Api {
             code,
-            message,
+            message: message.to_string(),
             endpoint: path.into(),
         })
     }
@@ -491,7 +525,7 @@ impl NeteaseClient {
             .collect())
     }
 
-    async fn playlist_cache_get(&self, id: u64) -> Option<RawPlaylist> {
+    async fn playlist_cache_get(&self, id: u64) -> Option<Arc<RawPlaylist>> {
         let cache = self.playlist_cache.read().await;
         cache
             .get(&id)
@@ -499,25 +533,23 @@ impl NeteaseClient {
             .map(|(_, p)| p.clone())
     }
 
-    async fn playlist_detail_raw(&self, id: u64) -> Result<RawPlaylist, ApiError> {
+    async fn playlist_detail_raw(&self, id: u64) -> Result<Arc<RawPlaylist>, ApiError> {
         if let Some(cached) = self.playlist_cache_get(id).await {
             return Ok(cached);
         }
-        let value = self
-            .post_ok(
+        let response: PlaylistDetailResponse = self
+            .post_response(
                 CryptoMode::Eapi,
                 "/api/v6/playlist/detail",
                 json!({ "id": id, "n": 100000, "s": 8 }),
             )
             .await?;
-        let response: PlaylistDetailResponse =
-            serde_json::from_value(value).map_err(|e| ApiError::Decode {
-                endpoint: "/api/v6/playlist/detail".into(),
-                message: e.to_string(),
-            })?;
+        self.check_response_code(response.code, "", "/api/v6/playlist/detail", true)
+            .await?;
         let playlist = response
             .playlist
             .ok_or_else(|| ApiError::NotFound(format!("playlist {id}")))?;
+        let playlist = Arc::new(playlist);
         if playlist
             .track_ids
             .len()
@@ -563,7 +595,7 @@ impl NeteaseClient {
         let end = offset.saturating_add(limit).min(total);
         let slice = &ids[offset..end];
         let songs = self.song_details(slice).await?;
-        let summary = raw.into_summary();
+        let summary = raw.summary();
         let has_more = end < total;
         Ok(PlaylistTracks {
             playlist: summary,
@@ -629,7 +661,7 @@ impl NeteaseClient {
                 unique.push(*id);
             }
         }
-        let mut by_id = HashMap::new();
+        let mut songs = Vec::with_capacity(unique.len());
         for chunk in unique.chunks(MAX_SONG_DETAIL_CHUNK) {
             let c = format!(
                 "[{}]",
@@ -639,23 +671,19 @@ impl NeteaseClient {
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            let value = self
-                .post_ok(CryptoMode::Eapi, "/api/v3/song/detail", json!({ "c": c }))
+            let response: SongDetailResponse = self
+                .post_response(CryptoMode::Eapi, "/api/v3/song/detail", json!({ "c": c }))
                 .await?;
-            let response: SongDetailResponse =
-                serde_json::from_value(value).map_err(|e| ApiError::Decode {
-                    endpoint: "/api/v3/song/detail".into(),
-                    message: e.to_string(),
-                })?;
+            self.check_response_code(response.code, "", "/api/v3/song/detail", true)
+                .await?;
+            let mut by_id = HashMap::with_capacity(chunk.len());
             for raw in response.songs {
                 let song = raw.into_song();
                 by_id.insert(song.id, song);
             }
+            songs.extend(chunk.iter().filter_map(|id| by_id.remove(id)));
         }
-        Ok(unique
-            .into_iter()
-            .filter_map(|id| by_id.remove(&id))
-            .collect())
+        Ok(songs)
     }
 
     pub async fn daily_songs(&self) -> Result<Vec<Song>, ApiError> {
@@ -950,7 +978,10 @@ impl NeteaseClient {
     }
 
     pub async fn stream_url(&self, id: u64) -> Result<StreamUrl, ApiError> {
-        let requested = self.quality;
+        self.stream_url_at(id, self.quality).await
+    }
+
+    pub async fn stream_url_at(&self, id: u64, requested: Quality) -> Result<StreamUrl, ApiError> {
         let mut levels = vec![requested, Quality::Exhigh, Quality::Standard];
         let mut seen = HashSet::new();
         levels.retain(|q| seen.insert(q.as_str()));
@@ -989,6 +1020,7 @@ impl NeteaseClient {
                     bitrate: item.br,
                     format: item.format,
                     size: item.size,
+                    md5: item.md5,
                     level: item.level,
                     trial,
                 });

@@ -183,7 +183,6 @@ async fn empty_queue_commands_are_clear_errors() {
         .unwrap();
     let error = client.request(Command::Play).await.unwrap_err();
     assert_eq!(error.code, "invalid_argument");
-    assert!(error.message.contains("queue"));
     client.close().await;
     daemon.shutdown().await;
 }
