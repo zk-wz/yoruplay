@@ -57,6 +57,24 @@ fn cache_list_rejects_oversized_pages_without_creating_paths() {
 }
 
 #[test]
+fn liked_rejects_oversized_pages_without_creating_paths() {
+    let temporary = tempfile::tempdir().unwrap();
+    for limit in ["0", "1001"] {
+        let output = isolated_command(temporary.path())
+            .args(["library", "liked", "--limit", limit])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "limit {limit}");
+        for directory in ["home", "config", "data", "cache", "runtime"] {
+            assert!(
+                !temporary.path().join(directory).exists(),
+                "limit {limit} created {directory}"
+            );
+        }
+    }
+}
+
+#[test]
 fn configuration_keys_are_typed_and_invalid_writes_preserve_file() {
     let temporary = tempfile::tempdir().unwrap();
     let output = isolated_command(temporary.path())

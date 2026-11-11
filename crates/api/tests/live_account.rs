@@ -52,8 +52,13 @@ async fn live_account_read_only() {
         );
     }
 
-    let liked = client.liked_songs().await.expect("liked songs");
-    println!("liked: {} songs ({})", liked.songs.len(), liked.title);
+    let liked = client.liked_tracks(0, 50).await.expect("liked songs");
+    println!(
+        "liked: {} songs ({} total, has_more={})",
+        liked.songs.len(),
+        liked.total,
+        liked.has_more
+    );
 
     let daily = client.daily_songs().await.expect("daily songs");
     println!("daily songs: {}", daily.len());

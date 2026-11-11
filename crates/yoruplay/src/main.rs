@@ -161,7 +161,12 @@ enum LibraryAction {
         kind: String,
     },
     /// List liked songs.
-    Liked,
+    Liked {
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
     /// List the NetEase server's recently played songs.
     Recent,
     /// List today's recommended songs.
@@ -568,7 +573,10 @@ async fn library_command(args: LibraryArgs, paths: &Paths, json: bool) -> Result
                 other => print_result(other),
             }
         }
-        LibraryAction::Liked => songs_command(paths, Command::LikedSongs, json).await,
+        LibraryAction::Liked { offset, limit } => {
+            validate_page_limit(limit)?;
+            tracks_command(paths, Command::LikedTracks { offset, limit }, json).await
+        }
         LibraryAction::Recent => songs_command(paths, Command::RecentSongs, json).await,
         LibraryAction::Daily { refresh } => {
             songs_command(paths, Command::DailySongs { refresh }, json).await
@@ -595,31 +603,12 @@ async fn library_command(args: LibraryArgs, paths: &Paths, json: bool) -> Result
             }
         }
         LibraryAction::Radar { refresh } => {
-            let result = send(paths, Command::Radar { refresh }).await?;
-            if json {
-                return print_json(&result);
-            }
-            match result {
-                CommandResult::PlaylistTracks(tracks) => {
-                    print_tracks(&tracks);
-                    Ok(())
-                }
-                other => print_result(other),
-            }
+            tracks_command(paths, Command::Radar { refresh }, json).await
         }
         LibraryAction::Fm => ack(paths, Command::PersonalFm, json).await,
         LibraryAction::Playlist { id, offset, limit } => {
-            let result = send(paths, Command::PlaylistTracks { id, offset, limit }).await?;
-            if json {
-                return print_json(&result);
-            }
-            match result {
-                CommandResult::PlaylistTracks(tracks) => {
-                    print_tracks(&tracks);
-                    Ok(())
-                }
-                other => print_result(other),
-            }
+            validate_page_limit(limit)?;
+            tracks_command(paths, Command::PlaylistTracks { id, offset, limit }, json).await
         }
     }
 }
@@ -744,7 +733,7 @@ fn help_library(root: bool) -> Tree<String> {
     };
     Tree::new(label).with_leaves([
         help_item("playlists", "List created or subscribed playlists"),
-        help_item("liked", "List liked songs"),
+        help_item("liked", "List liked songs (--offset, --limit)"),
         help_item("recent", "List server recently played songs"),
         help_item("daily", "List today's recommended songs"),
         help_item("daily-playlists", "List today's recommended playlists"),
@@ -917,6 +906,14 @@ async fn ack(paths: &Paths, command: Command, json: bool) -> Result<()> {
     print_result(result)
 }
 
+fn validate_page_limit(limit: usize) -> Result<()> {
+    if (1..=1000).contains(&limit) {
+        Ok(())
+    } else {
+        bail!("limit must be between 1 and 1000")
+    }
+}
+
 async fn songs_command(paths: &Paths, command: Command, json: bool) -> Result<()> {
     let result = send(paths, command).await?;
     if json {
@@ -925,6 +922,20 @@ async fn songs_command(paths: &Paths, command: Command, json: bool) -> Result<()
     match result {
         CommandResult::Songs(view) => {
             print_songs(&view);
+            Ok(())
+        }
+        other => print_result(other),
+    }
+}
+
+async fn tracks_command(paths: &Paths, command: Command, json: bool) -> Result<()> {
+    let result = send(paths, command).await?;
+    if json {
+        return print_json(&result);
+    }
+    match result {
+        CommandResult::PlaylistTracks(tracks) => {
+            print_tracks(&tracks);
             Ok(())
         }
         other => print_result(other),
@@ -1743,6 +1754,9 @@ fn print_tracks(tracks: &PlaylistTracks) {
     }
     for (i, song) in tracks.songs.iter().enumerate() {
         print_song_line(tracks.offset + i + 1, song);
+    }
+    if tracks.has_more {
+        println!("more available: --offset {}", tracks.next_offset);
     }
 }
 

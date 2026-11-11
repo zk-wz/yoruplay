@@ -83,6 +83,8 @@ pub struct PlaylistTracks {
     pub total: usize,
     #[serde(default)]
     pub has_more: bool,
+    #[serde(default)]
+    pub next_offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

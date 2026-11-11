@@ -9,7 +9,8 @@ use yoruplay_ipc::IpcClient;
 use yoruplay_protocol::{
     AuthState, Command, CommandResult, ErrorInfo, Event, Language, NoticeLevel, PlayMode,
     PlaySource, PlaybackState, PlaybackStatus, PlaylistKind, PlaylistRef, PlaylistSummary,
-    QueueSnapshot, SearchItems, SearchKind, SearchPage, SongsView, StateSnapshot, LOGIN_URL,
+    PlaylistTracks, QueueSnapshot, SearchItems, SearchKind, SearchPage, SongsView, StateSnapshot,
+    LOGIN_URL,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +183,17 @@ pub struct ConfirmState {
     pub message: String,
 }
 
+const PLAYLIST_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSource {
+    Playlist,
+    Liked,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PlaylistPage {
+    pub source: PageSource,
     pub id: u64,
     pub offset: usize,
     pub total: usize,
@@ -209,7 +219,10 @@ pub enum RequestKind {
         selected: usize,
         generation: u64,
     },
-    LikedSongs,
+    LikedTracks {
+        generation: u64,
+        selected: usize,
+    },
     RecentSongs,
     Radar {
         refresh: bool,
@@ -354,7 +367,7 @@ impl App {
                 | RequestKind::DailyPlaylists { .. }
                 | RequestKind::Playlists { .. }
                 | RequestKind::PlaylistTracks { .. }
-                | RequestKind::LikedSongs
+                | RequestKind::LikedTracks { .. }
                 | RequestKind::RecentSongs
                 | RequestKind::Radar { .. }
                 | RequestKind::ArtistSongs { .. }
@@ -629,26 +642,7 @@ impl App {
                     if generation != self.playlist_generation {
                         return;
                     }
-                    self.playlist_page = Some(PlaylistPage {
-                        id,
-                        offset: tracks.offset,
-                        total: tracks.total,
-                    });
-                    let context = Some(PlaylistRef {
-                        id: tracks.playlist.id,
-                        name: tracks.playlist.name.clone(),
-                    });
-                    self.detail = Detail::Songs {
-                        view: SongsView {
-                            title: tracks.playlist.name.clone(),
-                            description: tracks.playlist.description.clone(),
-                            songs: tracks.songs,
-                            context,
-                        },
-                        origin: SongsOrigin::Playlist(id),
-                        selected: selected.saturating_sub(tracks.offset),
-                    };
-                    self.focus = Focus::Detail;
+                    self.apply_page(PageSource::Playlist, id, tracks, selected);
                     if self.detail.title().is_empty() {
                         self.set_status(NoticeLevel::Info, title);
                     }
@@ -656,14 +650,15 @@ impl App {
                 Ok(other) => self.show_unexpected(other),
                 Err(error) => self.status_error(error),
             },
-            RequestKind::LikedSongs => match result {
-                Ok(CommandResult::Songs(view)) => {
-                    self.detail = Detail::Songs {
-                        view,
-                        origin: SongsOrigin::Liked,
-                        selected: 0,
-                    };
-                    self.focus = Focus::Detail;
+            RequestKind::LikedTracks {
+                generation,
+                selected,
+            } => match result {
+                Ok(CommandResult::PlaylistTracks(tracks)) => {
+                    if generation != self.playlist_generation {
+                        return;
+                    }
+                    self.apply_page(PageSource::Liked, 0, tracks, selected);
                 }
                 Ok(other) => self.show_unexpected(other),
                 Err(error) => self.status_error(error),
@@ -1160,8 +1155,18 @@ impl App {
             self.menu_index = index as usize;
         } else {
             if let Some(page) = self.playlist_page {
-                if matches!(self.detail, Detail::Songs { origin: SongsOrigin::Playlist(id), .. } if id == page.id)
-                {
+                let on_page = match &self.detail {
+                    Detail::Songs {
+                        origin: SongsOrigin::Playlist(id),
+                        ..
+                    } => page.source == PageSource::Playlist && *id == page.id,
+                    Detail::Songs {
+                        origin: SongsOrigin::Liked,
+                        ..
+                    } => page.source == PageSource::Liked,
+                    _ => false,
+                };
+                if on_page {
                     let current = page.offset.saturating_add(self.detail.selected());
                     let next = (current as isize + delta)
                         .clamp(0, page.total.saturating_sub(1) as isize)
@@ -1250,13 +1255,7 @@ impl App {
                 self.send(RequestKind::StartPersonalFm, Command::PersonalFm);
             }
             MenuAction::Radar => self.load_radar(false),
-            MenuAction::Liked => {
-                self.detail = Detail::Loading {
-                    title: tr(self.lang, "Loading liked songs", "正在加载喜欢的音乐").into(),
-                };
-                self.focus = Focus::Detail;
-                self.send(RequestKind::LikedSongs, Command::LikedSongs);
-            }
+            MenuAction::Liked => self.load_liked(),
             MenuAction::MyPlaylists => self.load_playlists(PlaylistsOrigin::Created),
             MenuAction::Subscribed => self.load_playlists(PlaylistsOrigin::Subscribed),
             MenuAction::Recent => {
@@ -1446,12 +1445,7 @@ impl App {
         match self.detail.clone() {
             Detail::Songs { origin, .. } => match origin {
                 SongsOrigin::Daily => self.load_daily_songs(true),
-                SongsOrigin::Liked => {
-                    self.detail = Detail::Loading {
-                        title: tr(self.lang, "Refreshing liked songs", "正在刷新喜欢的音乐").into(),
-                    };
-                    self.send(RequestKind::LikedSongs, Command::LikedSongs);
-                }
+                SongsOrigin::Liked => self.load_liked(),
                 SongsOrigin::Recent => {
                     self.detail = Detail::Loading {
                         title: tr(self.lang, "Refreshing recently played", "正在刷新最近播放")
@@ -1534,15 +1528,29 @@ impl App {
     }
 
     pub fn load_playlist(&mut self, id: u64, title: String) {
-        self.load_playlist_page(id, title, 0, 0);
+        self.load_page(PageSource::Playlist, id, title, 0, 0);
+    }
+
+    fn load_liked(&mut self) {
+        self.load_page(PageSource::Liked, 0, String::new(), 0, 0);
     }
 
     fn select_playlist_track(&mut self, absolute: usize) -> bool {
         let Some(page) = self.playlist_page else {
             return false;
         };
-        if !matches!(self.detail, Detail::Songs { origin: SongsOrigin::Playlist(id), .. } if id == page.id)
-        {
+        let on_page = match &self.detail {
+            Detail::Songs {
+                origin: SongsOrigin::Playlist(id),
+                ..
+            } => page.source == PageSource::Playlist && *id == page.id,
+            Detail::Songs {
+                origin: SongsOrigin::Liked,
+                ..
+            } => page.source == PageSource::Liked,
+            _ => false,
+        };
+        if !on_page {
             return false;
         }
         let selected = absolute.min(page.total.saturating_sub(1));
@@ -1554,32 +1562,110 @@ impl App {
         if selected >= page.offset && selected < page.offset.saturating_add(len) {
             self.detail.set_selected(selected - page.offset);
         } else {
-            self.load_playlist_page(page.id, self.detail.title(), selected / 100 * 100, selected);
+            let offset = selected / PLAYLIST_PAGE_SIZE * PLAYLIST_PAGE_SIZE;
+            match page.source {
+                PageSource::Liked => {
+                    self.load_page(PageSource::Liked, 0, String::new(), offset, selected)
+                }
+                PageSource::Playlist => self.load_page(
+                    PageSource::Playlist,
+                    page.id,
+                    self.detail.title(),
+                    offset,
+                    selected,
+                ),
+            }
         }
         self.dirty = true;
         true
     }
 
-    fn load_playlist_page(&mut self, id: u64, title: String, offset: usize, selected: usize) {
+    fn apply_page(
+        &mut self,
+        source: PageSource,
+        requested_id: u64,
+        tracks: PlaylistTracks,
+        selected: usize,
+    ) {
+        let playlist_id = tracks.playlist.id;
+        let page_id = match source {
+            PageSource::Liked => playlist_id,
+            PageSource::Playlist => requested_id,
+        };
+        let title = tracks.playlist.name.clone();
+        let description = tracks.playlist.description.clone();
+        let context = (playlist_id != 0).then(|| PlaylistRef {
+            id: playlist_id,
+            name: title.clone(),
+        });
+        self.playlist_page = Some(PlaylistPage {
+            source,
+            id: page_id,
+            offset: tracks.offset,
+            total: tracks.total,
+        });
+        self.detail = Detail::Songs {
+            view: SongsView {
+                title,
+                description,
+                songs: tracks.songs,
+                context,
+            },
+            origin: match source {
+                PageSource::Playlist => SongsOrigin::Playlist(page_id),
+                PageSource::Liked => SongsOrigin::Liked,
+            },
+            selected: selected.saturating_sub(tracks.offset),
+        };
+        self.focus = Focus::Detail;
+    }
+
+    fn load_page(
+        &mut self,
+        source: PageSource,
+        id: u64,
+        title: String,
+        offset: usize,
+        selected: usize,
+    ) {
         self.playlist_generation = self.playlist_generation.wrapping_add(1);
         let generation = self.playlist_generation;
         self.detail = Detail::Loading {
-            title: format!("{} {title}…", tr(self.lang, "Loading", "正在加载")),
+            title: match source {
+                PageSource::Liked => {
+                    tr(self.lang, "Loading liked songs", "正在加载喜欢的音乐").into()
+                }
+                PageSource::Playlist => {
+                    format!("{} {title}…", tr(self.lang, "Loading", "正在加载"))
+                }
+            },
         };
         self.focus = Focus::Detail;
-        self.send(
-            RequestKind::PlaylistTracks {
-                id,
-                title,
-                selected,
-                generation,
-            },
-            Command::PlaylistTracks {
-                id,
-                offset,
-                limit: 100,
-            },
-        );
+        match source {
+            PageSource::Liked => self.send(
+                RequestKind::LikedTracks {
+                    generation,
+                    selected,
+                },
+                Command::LikedTracks {
+                    offset,
+                    limit: PLAYLIST_PAGE_SIZE,
+                },
+            ),
+            PageSource::Playlist => self.send(
+                RequestKind::PlaylistTracks {
+                    id,
+                    title,
+                    selected,
+                    generation,
+                },
+                Command::PlaylistTracks {
+                    id,
+                    offset,
+                    limit: PLAYLIST_PAGE_SIZE,
+                },
+            ),
+        }
     }
 
     fn load_artist(&mut self, id: u64, name: String) {

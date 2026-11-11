@@ -39,7 +39,7 @@ Deliberate differences:
 | `account`, `validate_session` | `user_account.js` | `/api/nuser/account/get` | weapi | Live-tested. |
 | `playlists(Created/Subscribed)` | `user_playlist.js` | `/api/user/playlist` | weapi | Paginates with `more`; splits by `subscribed`; hides specialType 5 from Created. |
 | `playlist_tracks` | `playlist_detail.js`, `playlist_track_all.js`, `song_detail.js` | `/api/v6/playlist/detail`, `/api/v3/song/detail` | eapi/eapi | Uses the ordered/deduplicated `trackIds`; chunked song details (500); 5-minute in-memory detail cache. |
-| `liked_songs` | `likelist.js` + playlist detail | `/api/song/like/get` | eapi | Prefers the "liked music" playlist for order; falls back to unordered likelist. |
+| `liked_tracks` | `likelist.js` + playlist detail | `/api/v6/playlist/detail`, `/api/song/like/get` | eapi | Paged; prefers the `specialType 5` liked playlist for order, falls back to the unordered likelist; page size capped at 1000. |
 | `daily_songs` | `recommend_songs.js` | `/api/v3/discovery/recommend/songs` | weapi | Preserves dailySongs server order; 6h cache in the daemon. |
 | `daily_playlists` | `recommend_resource.js` | `/api/v1/discovery/recommend/resource` | weapi | 6h cache. |
 | `radar` discovery | no upstream module | `/api/v1/discovery/recommend/resource` | weapi | Discovers a playlist whose name contains 私人雷达/Private Radar. Never hard-codes an ID. Explicit error if absent. |

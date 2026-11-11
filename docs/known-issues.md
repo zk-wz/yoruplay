@@ -11,10 +11,14 @@
   deletes the copy. Cookies are never logged.
 - **Real-account verification status**: an existing Firefox `MUSIC_U` session
   was imported with `yoruplay auth login --cookie-stdin`; the account profile,
-  created/subscribed playlists, liked songs, daily songs/playlists, Personal FM,
-  recent history, search, stream URL and lyrics were verified read-only with
-  `crates/api/tests/live_account.rs`. Heartbeat returned `不支持该歌单类型` for
-  the tested created playlist, so its real-account path remains unverified.
+  created/subscribed playlists, paged liked songs, daily songs/playlists,
+  Personal FM, recent history, search, stream URL and lyrics were verified
+  read-only with `crates/api/tests/live_account.rs`. Heartbeat returned
+  `不支持该歌单类型` for the tested created playlist, so its real-account path
+  remains unverified.
+- **Liked songs are paged**: the TUI loads 100 songs per page and the CLI
+  accepts `--offset/--limit`; playback still resolves the complete queue, but
+  song-detail batches are paced at 250 ms and no full-list song cache is kept.
 - **Private Radar variability**: the radar playlist appears in some
   `/api/v1/discovery/recommend/resource` responses but not every call. The
   daemon caches the daily playlist list; the direct API test can see a later

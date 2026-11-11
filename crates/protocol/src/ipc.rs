@@ -8,7 +8,7 @@ use crate::models::{
 
 /// Bumped whenever the request/response names or semantics change. Clients
 /// with a different version are rejected with a readable error.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Refuse absurd frames before attempting to allocate/deserialize them.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
@@ -55,7 +55,12 @@ pub enum Command {
     Playlists {
         kind: PlaylistKind,
     },
-    LikedSongs,
+    LikedTracks {
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "default_page_limit")]
+        limit: usize,
+    },
     RecentSongs,
     PlaylistTracks {
         id: u64,
@@ -282,5 +287,57 @@ impl ServerMessage {
             result: None,
             error: Some(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liked_tracks_command_round_trips() {
+        let command = Command::LikedTracks {
+            offset: 100,
+            limit: 50,
+        };
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "cmd": "liked_tracks",
+                "offset": 100,
+                "limit": 50,
+            })
+        );
+        let decoded: Command = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn playlist_tracks_next_offset_round_trips() {
+        let tracks = PlaylistTracks {
+            playlist: PlaylistSummary {
+                id: 1,
+                name: "Liked Songs".into(),
+                cover_url: None,
+                track_count: 200,
+                subscribed: false,
+                creator_id: 0,
+                creator_name: String::new(),
+                special_type: 5,
+                description: None,
+                play_count: 0,
+                update_time_ms: 0,
+            },
+            songs: Vec::new(),
+            offset: 100,
+            total: 200,
+            has_more: true,
+            next_offset: 200,
+        };
+        let json = serde_json::to_value(&tracks).unwrap();
+        assert_eq!(json["next_offset"], 200);
+        let decoded: PlaylistTracks = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, tracks);
     }
 }

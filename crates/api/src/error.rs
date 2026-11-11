@@ -80,6 +80,9 @@ impl ApiError {
                  Clash TUN for them), or log in on the official web page and import \
                  the MUSIC_U cookie.",
             ),
+            ApiError::Api {
+                code: 509 | 460, ..
+            } => Some("NetEase is rate-limiting requests. Wait a few minutes before retrying."),
             _ => None,
         }
     }

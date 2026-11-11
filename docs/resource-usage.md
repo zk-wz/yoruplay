@@ -138,6 +138,23 @@ markers. This checks attempts, not just successful HTTP responses.
   warned about: anonymous files there still consume RAM. No malloc_trim ritual,
   whole-song heap buffer or whole-audio mmap is used to manufacture a low PSS claim.
 
+### Liked paging memory check (2026-11-11)
+
+Release binaries, isolated XDG paths, real read-only session. The TUI opened
+Liked Songs and then played the first track; PSS came from
+`/proc/<pid>/smaps_rollup`. Both runs rendered the liked list (`add all` footer
+present).
+
+| Build | TUI PSS (KiB) | Daemon browse peak (KiB) | Daemon play peak (KiB) |
+|---|---:|---:|---:|
+| Before paging | 4,419 | 13,062 | 16,549 |
+| After paging | 3,512 | 10,965 | 14,136 |
+
+Paging holds 100 songs instead of the full library in the TUI/daemon browse
+path. Playback still builds the complete queue, but the after-build is lower in
+this run because the browse allocation is smaller and no song-detail cache was
+added.
+
 ## Build checks
 
 - `cargo test --workspace --locked`: 102 passed; three opt-in live tests ignored.

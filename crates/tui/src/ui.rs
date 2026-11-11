@@ -11,7 +11,7 @@ use yoruplay_protocol::{
 };
 
 use crate::app::{
-    mode_label, search_kind_label, tr, App, Detail, Focus, PlaylistsOrigin, SongsOrigin,
+    mode_label, search_kind_label, tr, App, Detail, Focus, PageSource, PlaylistsOrigin, SongsOrigin,
 };
 
 pub fn draw(app: &mut App, frame: &mut Frame) {
@@ -370,7 +370,11 @@ fn song_lines(
 ) -> Vec<Line<'static>> {
     let offset = app
         .playlist_page
-        .filter(|page| matches!(origin, SongsOrigin::Playlist(id) if id == page.id))
+        .filter(|page| match (page.source, origin) {
+            (PageSource::Playlist, SongsOrigin::Playlist(id)) => id == page.id,
+            (PageSource::Liked, SongsOrigin::Liked) => true,
+            _ => false,
+        })
         .map(|page| page.offset)
         .unwrap_or(0);
     if view.songs.is_empty() {

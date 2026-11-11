@@ -19,9 +19,9 @@ the same daemon and queue.
 - Native Rust NetEase Web API client (eapi + weapi, no Node.js at runtime).
 - Browser-assisted Firefox login, Cookie import, session reuse, logout and
   expiry detection.
-- Liked songs, created/subscribed playlists, full playlist tracks, server
-  recently-played history, daily songs/playlists, Personal FM and Private Radar
-  discovery.
+- Paged liked songs (100 per TUI page), created/subscribed playlists, full
+  playlist tracks, server recently-played history, daily songs/playlists,
+  Personal FM and Private Radar discovery.
 - Search songs, artists, albums and playlists with pagination.
 - Five modes: list repeat, track repeat, sequential, shuffle with short-repeat
   avoidance, and NetEase Heartbeat (心动模式) with playlist context.
@@ -206,7 +206,7 @@ yoruplay library daily
 yoruplay library daily-playlists --refresh
 yoruplay library radar
 yoruplay library fm
-yoruplay library liked
+yoruplay library liked --limit 100
 yoruplay library recent
 yoruplay cache clear
 yoruplay cache info

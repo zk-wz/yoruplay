@@ -755,7 +755,9 @@ impl Daemon {
                 let playlists = self.inner.api.playlists(kind).await?;
                 Ok(CommandResult::Playlists(playlists))
             }
-            Command::LikedSongs => Ok(CommandResult::Songs(self.inner.api.liked_songs().await?)),
+            Command::LikedTracks { offset, limit } => Ok(CommandResult::PlaylistTracks(
+                self.inner.api.liked_tracks(offset, limit).await?,
+            )),
             Command::RecentSongs => Ok(CommandResult::Songs(self.inner.api.recent_songs().await?)),
             Command::PlaylistTracks { id, offset, limit } => Ok(CommandResult::PlaylistTracks(
                 self.inner.api.playlist_tracks(id, offset, limit).await?,
@@ -965,7 +967,7 @@ impl Daemon {
                 "Private Radar is not present in this account's daily recommended playlists".into(),
             ));
         };
-        Ok(self.inner.api.playlist_tracks(found.id, 0, 100_000).await?)
+        Ok(self.inner.api.playlist_tracks_all(found.id).await?)
     }
 
     async fn start_personal_fm(&self) -> Result<CommandResult, ServiceError> {
@@ -1058,7 +1060,7 @@ impl Daemon {
         start_index: usize,
         start_song_id: Option<u64>,
     ) -> Result<CommandResult, ServiceError> {
-        let tracks = self.inner.api.playlist_tracks(id, 0, 100_000).await?;
+        let tracks = self.inner.api.playlist_tracks_all(id).await?;
         if tracks.songs.is_empty() {
             return Err(ServiceError::Invalid(
                 "playlist has no playable songs".into(),
@@ -1124,7 +1126,7 @@ impl Daemon {
     }
 
     async fn add_playlist(&self, id: u64) -> Result<CommandResult, ServiceError> {
-        let tracks = self.inner.api.playlist_tracks(id, 0, 100_000).await?;
+        let tracks = self.inner.api.playlist_tracks_all(id).await?;
         if tracks.songs.is_empty() {
             return Err(ServiceError::Invalid("playlist has no songs".into()));
         }

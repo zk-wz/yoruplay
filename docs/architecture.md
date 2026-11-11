@@ -89,7 +89,7 @@ exclusion set without allocating an O(queue-size) candidate vector.
 | Shuffle | Bounded recency exclusion | Random next / playback history |
 | Heartbeat | Contextual recommendation, unless local | Contextual next / history |
 
-IPC version 5 is newline-delimited JSON with a 4 MiB frame cap. Hello negotiates
+IPC version 6 is newline-delimited JSON with a 4 MiB frame cap. Hello negotiates
 the exact version. Requests have IDs; responses carry typed results or stable
 error code/message/hint. `Cancel { id }`, disconnect and superseded TUI browsing
 release owned request work. The TUI aborts stale browse tasks and rejects stale

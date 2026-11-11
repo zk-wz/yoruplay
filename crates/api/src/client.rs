@@ -8,8 +8,8 @@ use reqwest::header::{CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use yoruplay_protocol::{
-    AlbumSummary, ArtistSummary, AuthState, PlaylistKind, PlaylistRef, PlaylistSummary,
-    PlaylistTracks, Quality, SearchItems, SearchKind, SearchPage, Song, SongsView, UserProfile,
+    AlbumSummary, ArtistSummary, AuthState, PlaylistKind, PlaylistSummary, PlaylistTracks, Quality,
+    SearchItems, SearchKind, SearchPage, Song, SongsView, UserProfile,
 };
 
 use crate::crypto::{eapi_encrypt, random_weapi_secret, weapi_encrypt};
@@ -27,7 +27,10 @@ const EAPI_HOST: &str = "https://interfacepc.music.163.com";
 const WEAPI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
 const EAPI_UA: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
 const MAX_SONG_DETAIL_CHUNK: usize = 500;
+const MAX_PAGE_LIMIT: usize = 1_000;
 const PLAYLIST_CACHE_TTL: Duration = Duration::from_secs(300);
+const LIKED_PLAYLIST_CACHE_TTL: Duration = Duration::from_secs(600);
+const SONG_DETAIL_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_CACHED_PLAYLISTS: usize = 8;
 const MAX_CACHED_PLAYLIST_TRACKS: usize = 20_000;
 
@@ -80,6 +83,8 @@ pub struct NeteaseClient {
     session: Arc<RwLock<SessionData>>,
     startup_warning: Option<String>,
     playlist_cache: Arc<RwLock<PlaylistCache>>,
+    liked_playlist_cache: Arc<RwLock<Option<(Instant, u64)>>>,
+    song_detail_gate: Arc<tokio::sync::Mutex<Option<Instant>>>,
 }
 
 impl NeteaseClient {
@@ -123,6 +128,8 @@ impl NeteaseClient {
             session: Arc::new(RwLock::new(session)),
             startup_warning,
             playlist_cache: Arc::new(RwLock::new(HashMap::new())),
+            liked_playlist_cache: Arc::new(RwLock::new(None)),
+            song_detail_gate: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -449,6 +456,8 @@ impl NeteaseClient {
         if let Err(e) = session.persist() {
             tracing::warn!(error = %e, "failed to persist imported cookie session");
         }
+        drop(session);
+        self.invalidate_account_caches().await;
         Ok(profile)
     }
 
@@ -456,7 +465,15 @@ impl NeteaseClient {
         let mut session = self.session.write().await;
         session.clear_auth();
         session.remove_persisted()?;
-        Ok(session.auth_state())
+        let state = session.auth_state();
+        drop(session);
+        self.invalidate_account_caches().await;
+        Ok(state)
+    }
+
+    async fn invalidate_account_caches(&self) {
+        *self.liked_playlist_cache.write().await = None;
+        self.playlist_cache.write().await.clear();
     }
 
     async fn current_uid(&self) -> Result<u64, ApiError> {
@@ -510,7 +527,20 @@ impl NeteaseClient {
             }
             offset += count;
         }
+        if let Some(id) = find_liked_playlist(&out) {
+            *self.liked_playlist_cache.write().await = Some((Instant::now(), id));
+        }
         Ok(out)
+    }
+
+    async fn liked_playlist(&self) -> Result<u64, ApiError> {
+        if let Some((at, id)) = *self.liked_playlist_cache.read().await {
+            if at.elapsed() < LIKED_PLAYLIST_CACHE_TTL {
+                return Ok(id);
+            }
+        }
+        let all = self.all_playlists_raw().await?;
+        find_liked_playlist(&all).ok_or_else(|| ApiError::NotFound("liked songs playlist".into()))
     }
 
     pub async fn playlists(&self, kind: PlaylistKind) -> Result<Vec<PlaylistSummary>, ApiError> {
@@ -583,51 +613,65 @@ impl NeteaseClient {
         offset: usize,
         limit: usize,
     ) -> Result<PlaylistTracks, ApiError> {
+        let limit = validate_page_limit(limit)?;
         let raw = self.playlist_detail_raw(id).await?;
         let ids = raw.ordered_track_ids();
         let total = ids.len();
-        let limit = if limit == 0 {
-            total
-        } else {
-            limit.min(100_000)
-        };
-        let offset = offset.min(total);
-        let end = offset.saturating_add(limit).min(total);
+        let (offset, end) = page_bounds(total, offset, limit);
         let slice = &ids[offset..end];
         let songs = self.song_details(slice).await?;
         let summary = raw.summary();
-        let has_more = end < total;
         Ok(PlaylistTracks {
             playlist: summary,
             songs,
             offset,
             total,
-            has_more,
+            has_more: end < total,
+            next_offset: end,
         })
     }
 
-    pub async fn liked_songs(&self) -> Result<SongsView, ApiError> {
+    pub async fn playlist_tracks_all(&self, id: u64) -> Result<PlaylistTracks, ApiError> {
+        let raw = self.playlist_detail_raw(id).await?;
+        let ids = raw.ordered_track_ids();
+        let total = ids.len();
+        let songs = self.song_details(&ids).await?;
+        let summary = raw.summary();
+        Ok(PlaylistTracks {
+            playlist: summary,
+            songs,
+            offset: 0,
+            total,
+            has_more: false,
+            next_offset: total,
+        })
+    }
+
+    pub async fn liked_tracks(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<PlaylistTracks, ApiError> {
         self.require_login().await?;
-        let all = self.all_playlists_raw().await?;
-        if let Some(liked) = all.into_iter().find(|p| {
-            p.special_type == 5
-                || p.name.contains("喜欢的音乐")
-                || p.name.eq_ignore_ascii_case("liked songs")
-        }) {
-            let id = liked.id;
-            let name = if liked.name.is_empty() {
-                "Liked Songs".to_string()
-            } else {
-                liked.name.clone()
-            };
-            let tracks = self.playlist_tracks(id, 0, 100_000).await?;
-            return Ok(SongsView {
-                title: name.clone(),
-                description: None,
-                songs: tracks.songs,
-                context: Some(PlaylistRef { id, name }),
-            });
+        let limit = validate_page_limit(limit)?;
+        match self.liked_playlist().await {
+            Ok(id) => match self.playlist_tracks(id, offset, limit).await {
+                Err(ApiError::NotFound(_)) => {
+                    *self.liked_playlist_cache.write().await = None;
+                    self.liked_tracks_fallback(offset, limit).await
+                }
+                other => other,
+            },
+            Err(ApiError::NotFound(_)) => self.liked_tracks_fallback(offset, limit).await,
+            Err(e) => Err(e),
         }
+    }
+
+    async fn liked_tracks_fallback(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<PlaylistTracks, ApiError> {
         let uid = self.current_uid().await?;
         let value = self
             .post_ok(
@@ -641,12 +685,35 @@ impl NeteaseClient {
                 endpoint: "/api/song/like/get".into(),
                 message: e.to_string(),
             })?;
-        let songs = self.song_details(&response.ids).await?;
-        Ok(SongsView {
-            title: "Liked Songs".into(),
+        let mut seen = HashSet::new();
+        let ids: Vec<u64> = response
+            .ids
+            .into_iter()
+            .filter(|id| *id != 0 && seen.insert(*id))
+            .collect();
+        let total = ids.len();
+        let (offset, end) = page_bounds(total, offset, limit);
+        let songs = self.song_details(&ids[offset..end]).await?;
+        let playlist = PlaylistSummary {
+            id: 0,
+            name: "Liked Songs".into(),
+            cover_url: None,
+            track_count: total as u64,
+            subscribed: false,
+            creator_id: 0,
+            creator_name: String::new(),
+            special_type: 5,
             description: Some("Liked songs returned by NetEase (unordered fallback).".into()),
+            play_count: 0,
+            update_time_ms: 0,
+        };
+        Ok(PlaylistTracks {
+            playlist,
             songs,
-            context: None,
+            offset,
+            total,
+            has_more: end < total,
+            next_offset: end,
         })
     }
 
@@ -663,6 +730,7 @@ impl NeteaseClient {
         }
         let mut songs = Vec::with_capacity(unique.len());
         for chunk in unique.chunks(MAX_SONG_DETAIL_CHUNK) {
+            self.wait_song_detail_turn().await;
             let c = format!(
                 "[{}]",
                 chunk
@@ -684,6 +752,18 @@ impl NeteaseClient {
             songs.extend(chunk.iter().filter_map(|id| by_id.remove(id)));
         }
         Ok(songs)
+    }
+
+    async fn wait_song_detail_turn(&self) {
+        let mut last = self.song_detail_gate.lock().await;
+        if let Some(last_at) = *last {
+            let next = last_at + SONG_DETAIL_MIN_INTERVAL;
+            let now = Instant::now();
+            if next > now {
+                tokio::time::sleep(next - now).await;
+            }
+        }
+        *last = Some(Instant::now());
     }
 
     pub async fn daily_songs(&self) -> Result<Vec<Song>, ApiError> {
@@ -773,7 +853,7 @@ impl NeteaseClient {
                 "Private Radar is not present in this account's daily recommended playlists".into(),
             ));
         };
-        self.playlist_tracks(found.id, 0, 100_000).await
+        self.playlist_tracks_all(found.id).await
     }
 
     pub async fn recent_songs(&self) -> Result<SongsView, ApiError> {
@@ -1106,6 +1186,35 @@ impl NeteaseClient {
     }
 }
 
+fn is_liked_playlist(playlist: &RawPlaylist) -> bool {
+    playlist.special_type == 5
+        || playlist.name.contains("喜欢的音乐")
+        || playlist.name.eq_ignore_ascii_case("liked songs")
+}
+
+fn find_liked_playlist(playlists: &[RawPlaylist]) -> Option<u64> {
+    playlists
+        .iter()
+        .find(|playlist| is_liked_playlist(playlist))
+        .map(|playlist| playlist.id)
+}
+
+fn validate_page_limit(limit: usize) -> Result<usize, ApiError> {
+    if (1..=MAX_PAGE_LIMIT).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err(ApiError::InvalidArgument(format!(
+            "limit must be between 1 and {MAX_PAGE_LIMIT}"
+        )))
+    }
+}
+
+fn page_bounds(total: usize, offset: usize, limit: usize) -> (usize, usize) {
+    let offset = offset.min(total);
+    let end = offset.saturating_add(limit).min(total);
+    (offset, end)
+}
+
 fn json_i64(value: &Value, key: &str) -> Option<i64> {
     match value.get(key)? {
         Value::Number(n) => n.as_i64(),
@@ -1299,5 +1408,52 @@ mod tests {
     fn json_code_accepts_numeric_strings() {
         assert_eq!(json_i64(&json!({"code": "801"}), "code"), Some(801));
         assert_eq!(json_i64(&json!({"code": 200}), "code"), Some(200));
+    }
+
+    #[test]
+    fn finds_liked_playlist_by_special_type_or_name() {
+        let by_type = RawPlaylist {
+            id: 7,
+            special_type: 5,
+            ..Default::default()
+        };
+        assert_eq!(find_liked_playlist(&[by_type]), Some(7));
+
+        let by_zh = RawPlaylist {
+            id: 8,
+            name: "我喜欢的音乐".into(),
+            ..Default::default()
+        };
+        assert_eq!(find_liked_playlist(&[by_zh]), Some(8));
+
+        let by_en = RawPlaylist {
+            id: 9,
+            name: "Liked Songs".into(),
+            ..Default::default()
+        };
+        assert_eq!(find_liked_playlist(&[by_en]), Some(9));
+
+        let other = RawPlaylist {
+            id: 10,
+            name: "Other".into(),
+            ..Default::default()
+        };
+        assert_eq!(find_liked_playlist(&[other]), None);
+    }
+
+    #[test]
+    fn page_bounds_clamps_and_reports_next_offset() {
+        assert_eq!(page_bounds(924, 0, 100), (0, 100));
+        assert_eq!(page_bounds(924, 900, 100), (900, 924));
+        assert_eq!(page_bounds(924, 2000, 100), (924, 924));
+        assert_eq!(page_bounds(0, 0, 100), (0, 0));
+    }
+
+    #[test]
+    fn page_limit_is_bounded() {
+        assert!(validate_page_limit(1).is_ok());
+        assert!(validate_page_limit(1000).is_ok());
+        assert!(validate_page_limit(0).is_err());
+        assert!(validate_page_limit(1001).is_err());
     }
 }
