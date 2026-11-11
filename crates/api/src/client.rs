@@ -296,7 +296,9 @@ impl NeteaseClient {
         }
         if !set_cookies.is_empty() {
             let mut session = self.session.write().await;
-            session.merge_cookies(set_cookies.iter().map(String::as_str));
+            if session.merge_cookies(set_cookies.iter().map(String::as_str)) {
+                session.persist_if_stale();
+            }
         }
         let parsed = serde_json::from_slice::<T>(&body);
         match parsed {
@@ -364,9 +366,9 @@ impl NeteaseClient {
             let mut session = self.session.write().await;
             let was_logged_in = session.logged_in();
             if destructive_auth_failure && was_logged_in {
-                session.mark_expired();
-                if let Err(e) = session.remove_persisted() {
-                    tracing::warn!(error = %e, "failed to remove expired session file");
+                session.clear_credentials(true);
+                if let Err(e) = session.persist_device() {
+                    tracing::warn!(error = %e, "failed to persist device after session expiry");
                 }
             }
             return Err(if was_logged_in {
@@ -415,21 +417,13 @@ impl NeteaseClient {
             Ok(Some(profile))
         } else {
             if session.logged_in() {
-                session.mark_expired();
-                if let Err(e) = session.remove_persisted() {
-                    tracing::warn!(error = %e, "failed to remove expired session file");
+                session.clear_credentials(true);
+                if let Err(e) = session.persist_device() {
+                    tracing::warn!(error = %e, "failed to persist device after account removal");
                 }
             }
             Ok(None)
         }
-    }
-
-    /// Validate the loaded session at startup without asking the user again.
-    pub async fn validate_session(&self) -> Result<AuthState, ApiError> {
-        if self.session.read().await.logged_in() {
-            let _ = self.account().await?;
-        }
-        Ok(self.auth_state().await)
     }
 
     pub async fn import_cookie(&self, cookie: &str) -> Result<UserProfile, ApiError> {
@@ -463,8 +457,8 @@ impl NeteaseClient {
 
     pub async fn logout(&self) -> Result<AuthState, ApiError> {
         let mut session = self.session.write().await;
-        session.clear_auth();
-        session.remove_persisted()?;
+        session.clear_credentials(false);
+        session.persist_device()?;
         let state = session.auth_state();
         drop(session);
         self.invalidate_account_caches().await;

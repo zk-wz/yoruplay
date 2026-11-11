@@ -1013,6 +1013,15 @@ async fn ensure_daemon(paths: &Paths) -> Result<IpcClient> {
     ))
 }
 
+fn login_retry_delay(error: &ErrorInfo) -> Option<Duration> {
+    match error.code.as_str() {
+        "browser_cookie_missing" | "browser_profile_missing" => Some(Duration::from_secs(2)),
+        "invalid_cookie" | "not_logged_in" | "session_expired" => Some(Duration::from_secs(5)),
+        "browser_same_account" => Some(Duration::from_secs(2)),
+        _ => None,
+    }
+}
+
 async fn login(paths: &Paths, args: LoginArgs, json: bool) -> Result<()> {
     let client = ensure_daemon(paths).await?;
     if args.cookie_stdin {
@@ -1043,20 +1052,13 @@ async fn login(paths: &Paths, args: LoginArgs, json: bool) -> Result<()> {
                     client.close().await;
                     return print_auth_result(result, json);
                 }
-                Err(error)
-                    if matches!(
-                        error.code.as_str(),
-                        "browser_cookie_missing"
-                            | "browser_profile_missing"
-                            | "invalid_cookie"
-                            | "not_logged_in"
-                            | "session_expired"
-                            | "api_error"
-                    ) => {}
-                Err(error) => {
-                    client.close().await;
-                    return Err(ipc_error(error));
-                }
+                Err(error) => match login_retry_delay(&error) {
+                    Some(_) => {}
+                    None => {
+                        client.close().await;
+                        return Err(ipc_error(error));
+                    }
+                },
             }
         }
 
@@ -1076,31 +1078,21 @@ async fn login(paths: &Paths, args: LoginArgs, json: bool) -> Result<()> {
                     client.close().await;
                     return print_auth_result(result, json);
                 }
-                Err(error)
-                    if matches!(
-                        error.code.as_str(),
-                        "browser_cookie_missing"
-                            | "invalid_cookie"
-                            | "not_logged_in"
-                            | "session_expired"
-                            | "api_error"
-                    ) =>
-                {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-                Err(error) if error.code == "browser_same_account" => {
-                    if !same_account_reported {
-                        eprintln!(
-                            "Firefox is still logged in as the current account; switch accounts there."
-                        );
-                        same_account_reported = true;
+                Err(error) => match login_retry_delay(&error) {
+                    Some(delay) => {
+                        if error.code == "browser_same_account" && !same_account_reported {
+                            eprintln!(
+                                "Firefox is still logged in as the current account; switch accounts there."
+                            );
+                            same_account_reported = true;
+                        }
+                        tokio::time::sleep(delay).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-                Err(error) => {
-                    client.close().await;
-                    return Err(ipc_error(error));
-                }
+                    None => {
+                        client.close().await;
+                        return Err(ipc_error(error));
+                    }
+                },
             }
         }
         client.close().await;
@@ -1907,6 +1899,23 @@ mod tail_file_tests {
             assert_eq!(tail_file(&path, 2).unwrap(), "second\nlast");
             assert_eq!(tail_file(&path, 0).unwrap(), "");
         }
+    }
+
+    #[test]
+    fn login_retry_delay_stops_api_errors() {
+        assert!(login_retry_delay(&ErrorInfo::new("api_error", "risk")).is_none());
+        assert_eq!(
+            login_retry_delay(&ErrorInfo::new("browser_cookie_missing", "missing")),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            login_retry_delay(&ErrorInfo::new("invalid_cookie", "invalid")),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            login_retry_delay(&ErrorInfo::new("browser_same_account", "same")),
+            Some(Duration::from_secs(2))
+        );
     }
 
     #[test]

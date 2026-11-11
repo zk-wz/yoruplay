@@ -7,9 +7,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use rand::Rng;
@@ -29,6 +30,8 @@ const COOKIE_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 const EAPI_APPVER: &str = "8.20.20.231215173437";
+const DEVICE_ID_HEX_LEN: usize = 52;
+const COOKIE_PERSIST_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Device {
@@ -40,7 +43,6 @@ pub struct Device {
     pub nuid: String,
     pub nnid: String,
     pub wnmcid: String,
-    pub buildver: String,
     pub resolution: String,
     pub versioncode: String,
 }
@@ -64,22 +66,12 @@ impl Device {
             osver: "14".into(),
             appver: EAPI_APPVER.into(),
             channel: "xiaomi".into(),
-            device_id: random_hex(&mut rng, 26).to_uppercase(),
+            device_id: random_hex(&mut rng, DEVICE_ID_HEX_LEN).to_uppercase(),
             nnid: format!("{nuid},{now_ms}"),
             nuid,
             wnmcid: format!("{}.{}.01.0", random_letters(&mut rng, 6), now_ms),
-            buildver: (now_ms / 1000).to_string(),
             resolution: "1920x1080".into(),
             versioncode: "140".into(),
-        }
-    }
-
-    pub fn refresh_timestamps(&mut self) {
-        let now = now_ms();
-        self.buildver = (now / 1000).to_string();
-        // WNMCID embeds creation time; keep it stable for the device.
-        if self.nnid.is_empty() {
-            self.nnid = format!("{},{}", self.nuid, now);
         }
     }
 }
@@ -109,6 +101,7 @@ pub struct SessionData {
     pub profile: Option<yoruplay_protocol::UserProfile>,
     pub expired: bool,
     auth_path: Option<PathBuf>,
+    last_cookie_persist: Option<Instant>,
 }
 
 impl fmt::Debug for SessionData {
@@ -148,6 +141,7 @@ impl SessionData {
             profile: stored.profile,
             expired: false,
             auth_path: Some(path),
+            last_cookie_persist: None,
         })
     }
 
@@ -158,6 +152,7 @@ impl SessionData {
             profile: None,
             expired: false,
             auth_path,
+            last_cookie_persist: None,
         }
     }
 
@@ -236,24 +231,36 @@ impl SessionData {
         self.expired = false;
     }
 
-    pub fn clear_auth(&mut self) {
+    pub fn clear_credentials(&mut self, expired: bool) {
         self.cookies.clear();
         self.profile = None;
-        self.expired = false;
-    }
-
-    pub fn mark_expired(&mut self) {
-        self.expired = true;
-        self.profile = None;
+        self.expired = expired;
     }
 
     /// Persist only when a real login exists. The file is written atomically
     /// with 0600 permissions; the parent directory is forced to 0700.
     pub fn persist(&self) -> Result<(), ApiError> {
-        if !self.logged_in() {
+        if !self.logged_in() || self.expired {
             return Ok(());
         }
         self.write_auth_file()
+    }
+
+    /// Persist server-refreshed cookies at most once per interval.
+    pub fn persist_if_stale(&mut self) {
+        if !self.logged_in() || self.expired {
+            return;
+        }
+        if self
+            .last_cookie_persist
+            .is_some_and(|at| at.elapsed() < COOKIE_PERSIST_INTERVAL)
+        {
+            return;
+        }
+        if let Err(e) = self.persist() {
+            tracing::warn!(error = %e, "failed to persist refreshed session cookies");
+        }
+        self.last_cookie_persist = Some(Instant::now());
     }
 
     /// Keep a stable device identity even before the first successful login.
@@ -297,17 +304,6 @@ impl SessionData {
             .map_err(|e| ApiError::SessionIo(e.to_string()))?;
         fs::rename(&tmp, path).map_err(|e| ApiError::SessionIo(e.to_string()))?;
         Ok(())
-    }
-
-    pub fn remove_persisted(&self) -> Result<(), ApiError> {
-        let Some(path) = &self.auth_path else {
-            return Ok(());
-        };
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(ApiError::SessionIo(e.to_string())),
-        }
     }
 
     pub fn auth_path(&self) -> Option<&Path> {
@@ -482,7 +478,7 @@ mod tests {
         assert!(loaded.logged_in());
         assert_eq!(loaded.profile.as_ref().unwrap().user_id, 7);
         assert_eq!(loaded.device.device_id, s.device.device_id);
-        loaded.remove_persisted().unwrap();
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -497,7 +493,7 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        loaded.remove_persisted().unwrap();
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -514,9 +510,64 @@ mod tests {
     fn expired_state_is_not_logged_in() {
         let mut s = SessionData::anonymous(None);
         s.import_cookie_string("MUSIC_U=secret").unwrap();
-        s.mark_expired();
+        s.clear_credentials(true);
         let state = s.auth_state();
         assert!(!state.logged_in);
         assert!(state.session_expired);
+    }
+
+    #[test]
+    fn new_device_id_is_52_uppercase_hex() {
+        let id = Device::new().device_id;
+        assert_eq!(id.len(), 52);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(id.bytes().all(|b| !b.is_ascii_lowercase()));
+    }
+
+    #[test]
+    fn legacy_26_char_device_id_loads_unchanged() {
+        let path = temp_path("legacy-device.json");
+        let mut session = SessionData::anonymous(Some(path.clone()));
+        let legacy = "A".repeat(26);
+        session.device.device_id = legacy.clone();
+        session.persist_device().unwrap();
+
+        let loaded = SessionData::load(Some(path.clone())).unwrap();
+        assert_eq!(loaded.device.device_id, legacy);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn clearing_credentials_preserves_device() {
+        let path = temp_path("clear-credentials.json");
+        let mut session = SessionData::anonymous(Some(path.clone()));
+        session
+            .import_cookie_string("MUSIC_U=secret; __csrf=token")
+            .unwrap();
+        let device_id = session.device.device_id.clone();
+        session.clear_credentials(true);
+        session.persist_device().unwrap();
+
+        let loaded = SessionData::load(Some(path.clone())).unwrap();
+        assert_eq!(loaded.device.device_id, device_id);
+        assert!(!loaded.logged_in());
+        assert!(loaded.cookies.is_empty());
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn refreshed_cookies_are_persisted() {
+        let path = temp_path("refresh-cookies.json");
+        let mut session = SessionData::anonymous(Some(path.clone()));
+        session.import_cookie_string("MUSIC_U=secret").unwrap();
+        assert!(session.merge_cookies(["NMTID=test-nmtid"]));
+        session.persist_if_stale();
+
+        let loaded = SessionData::load(Some(path.clone())).unwrap();
+        assert_eq!(
+            loaded.cookies.get("NMTID").map(String::as_str),
+            Some("test-nmtid")
+        );
+        fs::remove_file(&path).unwrap();
     }
 }

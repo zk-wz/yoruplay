@@ -83,6 +83,14 @@ impl ApiError {
             ApiError::Api {
                 code: 509 | 460, ..
             } => Some("NetEase is rate-limiting requests. Wait a few minutes before retrying."),
+            ApiError::Api { code: 10004, .. } => Some(
+                "NetEase reports a login security risk. Wait a few minutes before retrying; \
+                 do not retry rapidly.",
+            ),
+            ApiError::Api { code: -462, .. } => Some(
+                "NetEase requires a security verification (slider/behavior). Complete it in \
+                 the official client or web page, then retry.",
+            ),
             _ => None,
         }
     }
@@ -124,5 +132,27 @@ impl ApiError {
             message: self.user_message(),
             hint,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_risk_and_verification_hints_are_present() {
+        let risk = ApiError::Api {
+            code: 10004,
+            message: String::new(),
+            endpoint: "/api/nuser/account/get".into(),
+        };
+        assert!(risk.hint().unwrap().contains("security risk"));
+
+        let verify = ApiError::Api {
+            code: -462,
+            message: String::new(),
+            endpoint: "/api/nuser/account/get".into(),
+        };
+        assert!(verify.hint().unwrap().contains("security verification"));
     }
 }
