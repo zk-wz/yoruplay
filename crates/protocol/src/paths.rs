@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use serde::Serialize;
@@ -52,10 +52,12 @@ impl Paths {
             .join("yoruplay");
         let runtime_dir = match lookup("XDG_RUNTIME_DIR") {
             Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("yoruplay"),
-            // Keep a private fallback for unusual sessions (TTY login, tests).
+            // Prefer the normal per-user runtime directory when a shell did not
+            // export XDG_RUNTIME_DIR. The /tmp fallback is only for systems
+            // without a usable /run/user/<uid>.
             _ => {
                 let uid = unsafe { libc::geteuid() };
-                PathBuf::from(format!("/tmp/yoruplay-{uid}"))
+                fallback_runtime_dir(uid, Path::new("/run/user"))
             }
         };
         Ok(Self {
@@ -82,8 +84,8 @@ impl Paths {
         self.runtime_dir.join("yoruplay.sock")
     }
 
-    pub fn lock_file(&self) -> PathBuf {
-        self.runtime_dir.join("yoruplay.lock")
+    pub fn daemon_lock_file(&self) -> PathBuf {
+        self.data_dir.join("daemon.lock")
     }
 
     pub fn config_lock_file(&self) -> PathBuf {
@@ -167,6 +169,12 @@ impl Paths {
             "file",
             "Saved credentials (contents never listed)",
             "removed only by explicit logout",
+        );
+        add(
+            self.daemon_lock_file(),
+            "file",
+            "Global daemon ownership lock",
+            "daemon ownership lifetime; shared across runtime directories",
         );
         add(
             self.data_dir.join("auth.tmp-*"),
@@ -295,12 +303,7 @@ impl Paths {
             "Local daemon IPC",
             "daemon shutdown removes socket",
         );
-        add(
-            self.lock_file(),
-            "file",
-            "Daemon ownership lock",
-            "daemon ownership lifetime",
-        );
+
         add(
             std::env::temp_dir().join("yoruplay-firefox-*"),
             "pattern",
@@ -351,6 +354,15 @@ fn absolute(path: PathBuf) -> io::Result<PathBuf> {
     }
 }
 
+fn fallback_runtime_dir(uid: u32, run_user_root: &Path) -> PathBuf {
+    let user_runtime = run_user_root.join(uid.to_string());
+    if user_runtime.is_dir() {
+        user_runtime.join("yoruplay")
+    } else {
+        PathBuf::from(format!("/tmp/yoruplay-{uid}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,9 +392,26 @@ mod tests {
         let paths = Paths::from_env(|k| env.get(k).map(|v| (*v).into())).unwrap();
         assert_eq!(paths.config_dir, PathBuf::from("/home/u/.config/yoruplay"));
         assert_eq!(paths.cache_dir, PathBuf::from("/home/u/.cache/yoruplay"));
-        assert!(paths
-            .runtime_dir
-            .to_string_lossy()
-            .starts_with("/tmp/yoruplay-"));
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(
+            paths.runtime_dir,
+            fallback_runtime_dir(uid, Path::new("/run/user"))
+        );
+    }
+
+    #[test]
+    fn fallback_runtime_prefers_run_user() {
+        let root = std::env::temp_dir().join(format!("yoruplay-paths-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("1000")).unwrap();
+        assert_eq!(
+            fallback_runtime_dir(1000, &root),
+            root.join("1000/yoruplay")
+        );
+        assert_eq!(
+            fallback_runtime_dir(1000, &root.join("missing")),
+            PathBuf::from("/tmp/yoruplay-1000")
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 }

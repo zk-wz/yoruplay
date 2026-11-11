@@ -34,6 +34,8 @@ const MAX_LIST_BYTES: usize = 4 * 1024 * 1024 - 1024;
 pub enum CacheError {
     #[error("音频缓存 I/O 错误：{0}")]
     Io(#[from] io::Error),
+    #[error("另一个 YoruPlay daemon 正在使用音频缓存；请先停止它")]
+    Locked,
     #[error("音频缓存索引错误：{0}")]
     Index(String),
     #[error("音频网络请求失败：{0}")]
@@ -236,7 +238,13 @@ impl AudioCache {
             .read(true)
             .write(true)
             .open(dir.join("cache.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&process_lock)?;
+        fs2::FileExt::try_lock_exclusive(&process_lock).map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                CacheError::Locked
+            } else {
+                CacheError::Io(error)
+            }
+        })?;
         let memory_backed = probe_filesystem(&dir)?["memory_backed"]
             .as_bool()
             .unwrap_or(false);
@@ -1114,6 +1122,14 @@ fn push_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn second_cache_owner_reports_locked() {
+        let root = tempfile::tempdir().unwrap();
+        let _first = AudioCache::open(root.path().to_path_buf(), 1024, true).unwrap();
+        let second = AudioCache::open(root.path().to_path_buf(), 1024, true);
+        assert!(matches!(second, Err(CacheError::Locked)));
+    }
 
     #[test]
     fn offline_inspection_never_creates_missing_paths() {

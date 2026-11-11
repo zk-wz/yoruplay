@@ -430,7 +430,17 @@ async fn daemon_command(args: DaemonArgs, paths: &Paths, json: bool) -> Result<(
 }
 
 async fn status_command(paths: &Paths, json: bool) -> Result<()> {
-    let result = send(paths, Command::GetPlayback).await?;
+    let result = match send(paths, Command::GetPlayback).await {
+        Ok(result) => result,
+        Err(error) => {
+            if daemon_lock_held(paths)? {
+                bail!(
+                    "another YoruPlay daemon is already running, possibly with a different XDG_RUNTIME_DIR; stop it first"
+                );
+            }
+            return Err(error);
+        }
+    };
     if json {
         return print_json(&result);
     }
@@ -874,6 +884,10 @@ async fn shutdown_daemon(paths: &Paths, json: bool) -> Result<()> {
                     bail!("the daemon accepted shutdown but did not exit");
                 }
                 "Daemon stopped."
+            } else if daemon_lock_held(paths)? {
+                bail!(
+                    "another YoruPlay daemon is running with a different XDG_RUNTIME_DIR; stop it by PID"
+                );
             } else {
                 "Daemon is not running."
             }
@@ -959,11 +973,33 @@ fn ipc_error(error: ErrorInfo) -> anyhow::Error {
     }
 }
 
+fn daemon_lock_held(paths: &Paths) -> Result<bool> {
+    let path = paths.daemon_lock_file();
+    if !path.exists() {
+        return Ok(false);
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn ensure_daemon(paths: &Paths) -> Result<IpcClient> {
     if let Ok(client) = IpcClient::connect(paths.socket_file()).await {
         return Ok(client);
     }
     paths.ensure_dirs().context("create runtime directories")?;
+    if daemon_lock_held(paths)? {
+        bail!(
+            "another YoruPlay daemon is already running, possibly with a different XDG_RUNTIME_DIR; stop it first"
+        );
+    }
     let exe = std::env::current_exe().context("locate the yoruplay executable")?;
     let log_path = paths.log_file();
     if let Some(parent) = log_path.parent() {
@@ -1899,6 +1935,30 @@ mod tail_file_tests {
             assert_eq!(tail_file(&path, 2).unwrap(), "second\nlast");
             assert_eq!(tail_file(&path, 0).unwrap(), "");
         }
+    }
+
+    #[test]
+    fn global_daemon_lock_is_detected() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: directory.path().join("config/yoruplay"),
+            data_dir: directory.path().join("data/yoruplay"),
+            cache_dir: directory.path().join("cache/yoruplay"),
+            runtime_dir: directory.path().join("run/yoruplay"),
+        };
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        assert!(!daemon_lock_held(&paths).unwrap());
+
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(paths.daemon_lock_file())
+            .unwrap();
+        file.try_lock_exclusive().unwrap();
+        assert!(daemon_lock_held(&paths).unwrap());
+        drop(file);
+        assert!(!daemon_lock_held(&paths).unwrap());
     }
 
     #[test]

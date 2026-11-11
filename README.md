@@ -264,10 +264,11 @@ inspection does not create missing files or start a daemon.
 ~/.local/share/yoruplay/auth.json       # 0600
 ~/.local/share/yoruplay/state.json      # compact restore state, 0600
 ~/.local/share/yoruplay/queue-*.json     # versioned queue, 0600
+~/.local/share/yoruplay/daemon.lock      # 0600: global daemon ownership
 ~/.cache/yoruplay/metadata/            # independent TTL JSON cache
 ~/.cache/yoruplay/audio/               # native audio, manifests, artwork, index
 ~/.cache/yoruplay/{yoruplay,tui}.log
-$XDG_RUNTIME_DIR/yoruplay/             # 0700: IPC socket and daemon lock
+$XDG_RUNTIME_DIR/yoruplay/             # 0700: IPC socket
 ```
 
 Default config:

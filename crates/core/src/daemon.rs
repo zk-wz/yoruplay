@@ -27,7 +27,7 @@ use crate::service::{request_owner, Daemon};
 /// runtime. The caller owns logging setup.
 pub async fn run(paths: Paths, config: Config) -> Result<()> {
     paths.ensure_dirs().context("create XDG directories")?;
-    let _lock = acquire_instance_lock(&paths.lock_file())?;
+    let _lock = acquire_instance_lock(&paths.daemon_lock_file())?;
     let socket_path = paths.socket_file();
     remove_socket_if_present(&socket_path)?;
 
@@ -129,7 +129,8 @@ fn acquire_instance_lock(path: &Path) -> Result<fs::File> {
         .with_context(|| format!("open lock file {}", path.display()))?;
     file.try_lock_exclusive().map_err(|_| {
         anyhow::anyhow!(
-            "another YoruPlay daemon is already running (lock: {})",
+            "another YoruPlay daemon is already running, possibly with a different \
+             XDG_RUNTIME_DIR (lock: {})",
             path.display()
         )
     })?;
