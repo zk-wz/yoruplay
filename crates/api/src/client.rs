@@ -30,6 +30,7 @@ const MAX_SONG_DETAIL_CHUNK: usize = 500;
 const MAX_PAGE_LIMIT: usize = 1_000;
 const PLAYLIST_CACHE_TTL: Duration = Duration::from_secs(300);
 const LIKED_PLAYLIST_CACHE_TTL: Duration = Duration::from_secs(600);
+const LIKED_IDS_CACHE_TTL: Duration = Duration::from_secs(600);
 const SONG_DETAIL_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_CACHED_PLAYLISTS: usize = 8;
 const MAX_CACHED_PLAYLIST_TRACKS: usize = 20_000;
@@ -84,6 +85,7 @@ pub struct NeteaseClient {
     startup_warning: Option<String>,
     playlist_cache: Arc<RwLock<PlaylistCache>>,
     liked_playlist_cache: Arc<RwLock<Option<(Instant, u64)>>>,
+    liked_ids_cache: Arc<RwLock<Option<(Instant, HashSet<u64>)>>>,
     song_detail_gate: Arc<tokio::sync::Mutex<Option<Instant>>>,
 }
 
@@ -129,6 +131,7 @@ impl NeteaseClient {
             startup_warning,
             playlist_cache: Arc::new(RwLock::new(HashMap::new())),
             liked_playlist_cache: Arc::new(RwLock::new(None)),
+            liked_ids_cache: Arc::new(RwLock::new(None)),
             song_detail_gate: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
@@ -467,6 +470,7 @@ impl NeteaseClient {
 
     async fn invalidate_account_caches(&self) {
         *self.liked_playlist_cache.write().await = None;
+        *self.liked_ids_cache.write().await = None;
         self.playlist_cache.write().await.clear();
     }
 
@@ -661,11 +665,50 @@ impl NeteaseClient {
         }
     }
 
-    async fn liked_tracks_fallback(
-        &self,
-        offset: usize,
-        limit: usize,
-    ) -> Result<PlaylistTracks, ApiError> {
+    pub async fn is_song_liked(&self, song_id: u64) -> Result<bool, ApiError> {
+        self.require_login().await?;
+        {
+            let cache = self.liked_ids_cache.read().await;
+            if let Some((at, ids)) = cache.as_ref() {
+                if at.elapsed() < LIKED_IDS_CACHE_TTL {
+                    return Ok(ids.contains(&song_id));
+                }
+            }
+        }
+        let ids: HashSet<u64> = self.fetch_liked_song_ids().await?.into_iter().collect();
+        let liked = ids.contains(&song_id);
+        *self.liked_ids_cache.write().await = Some((Instant::now(), ids));
+        Ok(liked)
+    }
+
+    pub async fn toggle_song_liked(&self, song_id: u64) -> Result<bool, ApiError> {
+        self.require_login().await?;
+        let uid = self.current_uid().await?;
+        let mut ids: HashSet<u64> = self.fetch_liked_song_ids().await?.into_iter().collect();
+        let liked = !ids.contains(&song_id);
+        self.post_ok(
+            CryptoMode::Eapi,
+            "/api/song/like",
+            json!({
+                "trackId": song_id.to_string(),
+                "userid": uid.to_string(),
+                "like": liked,
+            }),
+        )
+        .await?;
+        if liked {
+            ids.insert(song_id);
+        } else {
+            ids.remove(&song_id);
+        }
+        *self.liked_ids_cache.write().await = Some((Instant::now(), ids));
+        self.playlist_cache.write().await.clear();
+        *self.liked_playlist_cache.write().await = None;
+        Ok(liked)
+    }
+
+    async fn fetch_liked_song_ids(&self) -> Result<Vec<u64>, ApiError> {
+        self.require_login().await?;
         let uid = self.current_uid().await?;
         let value = self
             .post_ok(
@@ -680,11 +723,19 @@ impl NeteaseClient {
                 message: e.to_string(),
             })?;
         let mut seen = HashSet::new();
-        let ids: Vec<u64> = response
+        Ok(response
             .ids
             .into_iter()
             .filter(|id| *id != 0 && seen.insert(*id))
-            .collect();
+            .collect())
+    }
+
+    async fn liked_tracks_fallback(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<PlaylistTracks, ApiError> {
+        let ids = self.fetch_liked_song_ids().await?;
         let total = ids.len();
         let (offset, end) = page_bounds(total, offset, limit);
         let songs = self.song_details(&ids[offset..end]).await?;

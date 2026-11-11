@@ -681,6 +681,16 @@ fn render_player(app: &App, frame: &mut Frame, area: Rect) {
         ),
     ];
     if let Some(song) = &p.current {
+        if app.liked_song == Some(song.id) {
+            if let Some(liked) = app.liked {
+                let (icon, color) = if liked {
+                    (" ♥", Color::Red)
+                } else {
+                    (" ♡", Color::DarkGray)
+                };
+                line1.push(Span::styled(icon, Style::default().fg(color)));
+            }
+        }
         line1.push(Span::styled(
             format!(" — {}", song.artist_text()),
             Style::default().fg(Color::Gray),
@@ -746,15 +756,15 @@ fn hint(app: &App) -> String {
     let base = if app.focus == Focus::Menu {
         tr(
             app.lang,
-            "j/k move · Enter open · Tab pane · / search · Space pause · m mode · ? help · q quit",
-            "j/k 移动 · 回车打开 · Tab 切换 · / 搜索 · 空格暂停 · m 模式 · ? 帮助 · q 退出",
+            "j/k move · Enter open · Tab pane · / search · Space pause · m mode · f like · ? help · q quit",
+            "j/k 移动 · 回车打开 · Tab 切换 · / 搜索 · 空格暂停 · m 模式 · f 喜欢 · ? 帮助 · q 退出",
         )
     } else {
         match &app.detail {
             Detail::Songs { .. } => tr(
                 app.lang,
-                "j/k move · Enter play · a add · A add all · r refresh · Esc back · Space pause · q quit",
-                "j/k 移动 · 回车播放 · a 加入队列 · A 全部加入 · r 刷新 · Esc 返回 · 空格暂停 · q 退出",
+                "j/k move · Enter play · f like · a add · A add all · r refresh · Esc back · Space pause · q quit",
+                "j/k 移动 · 回车播放 · f 喜欢 · a 加入队列 · A 全部加入 · r 刷新 · Esc 返回 · 空格暂停 · q 退出",
             ),
             Detail::Playlists { .. } => tr(
                 app.lang,
@@ -802,6 +812,7 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
         Line::raw(tr(app.lang, "Playback", "播放")),
         Line::raw("  Space        play/pause           n/p  next/previous"),
         Line::raw("  m            cycle mode           r    refresh view"),
+        Line::raw("  f            like/unlike current"),
         Line::raw("  a / A        add one / add all    q    quit TUI"),
         Line::raw(""),
         Line::raw(tr(app.lang, "Search", "搜索")),

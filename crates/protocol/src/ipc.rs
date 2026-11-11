@@ -8,7 +8,7 @@ use crate::models::{
 
 /// Bumped whenever the request/response names or semantics change. Clients
 /// with a different version are rejected with a readable error.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 /// Refuse absurd frames before attempting to allocate/deserialize them.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
@@ -139,6 +139,10 @@ pub enum Command {
     PlayPause,
     Next,
     Previous,
+    ToggleLike,
+    GetLiked {
+        song_id: u64,
+    },
     Stop,
     SeekRelative {
         offset_ms: i64,
@@ -185,6 +189,12 @@ pub enum CommandResult {
     Ack {
         #[serde(default)]
         message: Option<String>,
+    },
+    Liked {
+        song_id: u64,
+        #[serde(default)]
+        name: String,
+        liked: bool,
     },
     State(Box<StateSnapshot>),
     Playback(Box<PlaybackState>),
@@ -339,5 +349,27 @@ mod tests {
         assert_eq!(json["next_offset"], 200);
         let decoded: PlaylistTracks = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, tracks);
+    }
+
+    #[test]
+    fn toggle_like_round_trips() {
+        let command = Command::ToggleLike;
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json, serde_json::json!({ "cmd": "toggle_like" }));
+        assert_eq!(serde_json::from_value::<Command>(json).unwrap(), command);
+
+        let result = CommandResult::Liked {
+            song_id: 42,
+            name: "晴天".into(),
+            liked: true,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "liked",
+                "data": { "song_id": 42, "name": "晴天", "liked": true }
+            })
+        );
     }
 }

@@ -90,7 +90,7 @@ exclusion set without allocating an O(queue-size) candidate vector.
 | Heartbeat | Contextual recommendation, unless local | Contextual next / history |
 
 A global daemon ownership lock in the data directory prevents a second daemon
-even when two shells resolve different `XDG_RUNTIME_DIR` values. IPC version 6
+even when two shells resolve different `XDG_RUNTIME_DIR` values. IPC version 7
 is newline-delimited JSON with a 4 MiB frame cap. Hello negotiates
 the exact version. Requests have IDs; responses carry typed results or stable
 error code/message/hint. `Cancel { id }`, disconnect and superseded TUI browsing

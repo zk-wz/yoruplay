@@ -112,6 +112,8 @@ enum ControlAction {
     Volume { value: Option<f64> },
     /// Seek relative to the current position, in seconds (e.g. +10, -5).
     Seek { offset: String },
+    /// Toggle like on the current track.
+    Like,
 }
 
 #[derive(Args, Debug)]
@@ -505,6 +507,7 @@ async fn control_command(args: ControlArgs, paths: &Paths, json: bool) -> Result
             )
             .await
         }
+        ControlAction::Like => ack(paths, Command::ToggleLike, json).await,
     }
 }
 
@@ -709,6 +712,7 @@ fn help_control(root: bool) -> Tree<String> {
         help_item("mode [mode]", "Show or set the playback mode"),
         help_item("volume [value]", "Show or set the volume (0-100)"),
         help_item("seek <offset>", "Seek relative to the current position"),
+        help_item("like", "Toggle like on the current track"),
     ])
 }
 
@@ -1617,6 +1621,14 @@ fn print_result(result: CommandResult) -> Result<()> {
                 println!("{message}");
             } else {
                 println!("OK");
+            }
+        }
+        CommandResult::Liked { name, liked, .. } => {
+            let verb = if liked { "Liked" } else { "Unliked" };
+            if name.is_empty() {
+                println!("{verb} current song");
+            } else {
+                println!("{verb}: {name}");
             }
         }
         CommandResult::State(snapshot) => print_state(&snapshot),

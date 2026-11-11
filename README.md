@@ -19,9 +19,10 @@ the same daemon and queue.
 - Native Rust NetEase Web API client (eapi + weapi, no Node.js at runtime).
 - Browser-assisted Firefox login, Cookie import, session reuse, logout and
   expiry detection.
-- Paged liked songs (100 per TUI page), created/subscribed playlists, full
-  playlist tracks, server recently-played history, daily songs/playlists,
-  Personal FM and Private Radar discovery.
+- Paged liked songs (100 per TUI page), toggle the current track's liked state
+  from the TUI or CLI, created/subscribed playlists, full playlist tracks,
+  server recently-played history, daily songs/playlists, Personal FM and
+  Private Radar discovery.
 - Search songs, artists, albums and playlists with pagination.
 - Five modes: list repeat, track repeat, sequential, shuffle with short-repeat
   avoidance, and NetEase Heartbeat (心动模式) with playlist context.
@@ -170,6 +171,7 @@ Common keys:
 | `Space` | Pause / resume |
 | `n` / `p` | Next / previous |
 | `m` | Cycle mode |
+| `f` | Like / unlike the current track |
 | `a` / `A` | Add selected / add all to queue |
 | `r` | Refresh current view |
 | `L` | Login/account panel |
@@ -195,6 +197,7 @@ yoruplay control mode intelligence
 yoruplay control mode             # cycle modes
 yoruplay control volume 65
 yoruplay control seek +10
+yoruplay control like             # toggle the current track's liked state
 yoruplay queue list
 yoruplay queue list --offset 100 --limit 100
 yoruplay queue play-cache 123456

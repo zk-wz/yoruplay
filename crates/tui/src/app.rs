@@ -223,6 +223,13 @@ pub enum RequestKind {
         generation: u64,
         selected: usize,
     },
+    LikedState {
+        song_id: u64,
+        generation: u64,
+    },
+    ToggleLike {
+        song_id: u64,
+    },
     RecentSongs,
     Radar {
         refresh: bool,
@@ -267,6 +274,11 @@ pub struct App {
     pub auth: AuthState,
     pub warnings: Vec<String>,
     pub status: Option<StatusMessage>,
+    pub liked: Option<bool>,
+    pub liked_song: Option<u64>,
+    liked_request: Option<u64>,
+    liked_generation: u64,
+    like_pending: bool,
     pub input: Option<InputState>,
     pub login: Option<LoginState>,
     pub help: bool,
@@ -326,6 +338,11 @@ impl App {
             },
             warnings: Vec::new(),
             status: None,
+            liked: None,
+            liked_song: None,
+            liked_request: None,
+            liked_generation: 0,
+            like_pending: false,
             input: None,
             login: None,
             help: false,
@@ -391,6 +408,8 @@ impl App {
         let browse = !matches!(
             &kind,
             RequestKind::Generic { .. }
+                | RequestKind::LikedState { .. }
+                | RequestKind::ToggleLike { .. }
                 | RequestKind::QueuePage
                 | RequestKind::InitialState
                 | RequestKind::RefreshState
@@ -493,6 +512,7 @@ impl App {
                     self.dirty = true;
                 }
                 self.dirty = true;
+                self.sync_liked_state();
             }
             Event::QueueChanged { revision } => {
                 self.queue_wanted_revision = self.queue_wanted_revision.max(revision);
@@ -518,6 +538,8 @@ impl App {
                     );
                     self.open_login();
                 }
+                self.liked_generation = self.liked_generation.wrapping_add(1);
+                self.sync_liked_state();
                 self.dirty = true;
             }
             Event::Notice(notice) => {
@@ -821,6 +843,54 @@ impl App {
                 Ok(other) => self.show_unexpected(other),
                 Err(error) => self.status_error(error),
             },
+            RequestKind::LikedState {
+                song_id,
+                generation,
+            } => {
+                if let Ok(CommandResult::Liked { liked, .. }) = result {
+                    if generation == self.liked_generation
+                        && self
+                            .playback
+                            .current
+                            .as_ref()
+                            .is_some_and(|song| song.id == song_id)
+                    {
+                        self.liked = Some(liked);
+                        self.liked_song = Some(song_id);
+                        self.dirty = true;
+                    }
+                }
+            }
+            RequestKind::ToggleLike { song_id } => {
+                self.like_pending = false;
+                match result {
+                    Ok(CommandResult::Liked { name, liked, .. }) => {
+                        if self
+                            .playback
+                            .current
+                            .as_ref()
+                            .is_some_and(|song| song.id == song_id)
+                        {
+                            self.liked = Some(liked);
+                            self.liked_song = Some(song_id);
+                        }
+                        let text = match (self.lang, liked) {
+                            (Language::En, true) => format!("Liked \"{name}\"."),
+                            (Language::En, false) => format!("Unliked \"{name}\"."),
+                            (Language::Zh, true) => format!("已喜欢《{name}》。"),
+                            (Language::Zh, false) => format!("已取消喜欢《{name}》。"),
+                        };
+                        self.set_status(NoticeLevel::Info, text);
+                    }
+                    Err(error) => {
+                        if self.liked.is_none() {
+                            self.liked_request = None;
+                        }
+                        self.status_error(error);
+                    }
+                    Ok(other) => self.show_unexpected(other),
+                }
+            }
             RequestKind::Generic { label } => match result {
                 Ok(result) => match result {
                     CommandResult::Ack { message } => {
@@ -851,7 +921,36 @@ impl App {
         self.queue_wanted_revision = self.queue.revision;
         self.auth = snapshot.auth;
         self.warnings = snapshot.warnings;
+        self.sync_liked_state();
         self.dirty = true;
+    }
+
+    fn sync_liked_state(&mut self) {
+        let current_id = self.playback.current.as_ref().map(|song| song.id);
+        if current_id != self.liked_song {
+            self.liked = None;
+            self.liked_song = current_id;
+            self.liked_request = None;
+            self.liked_generation = self.liked_generation.wrapping_add(1);
+        }
+        if !self.auth.logged_in || self.auth.session_expired {
+            self.liked = None;
+            self.liked_request = None;
+            return;
+        }
+        let Some(song_id) = current_id else {
+            return;
+        };
+        if self.liked.is_none() && self.liked_request != Some(song_id) {
+            self.liked_request = Some(song_id);
+            self.send(
+                RequestKind::LikedState {
+                    song_id,
+                    generation: self.liked_generation,
+                },
+                Command::GetLiked { song_id },
+            );
+        }
     }
 
     pub fn open_login(&mut self) {
@@ -1117,6 +1216,7 @@ impl App {
                     Command::CycleMode,
                 );
             }
+            KeyCode::Char('f') => self.toggle_like(),
             KeyCode::Char('a') => self.add_selected(false),
             KeyCode::Char('A') => self.add_selected(true),
             KeyCode::Char('r') => self.refresh_detail(),
@@ -1129,6 +1229,30 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             _ => {}
         }
+    }
+
+    fn toggle_like(&mut self) {
+        let Some(song_id) = self.playback.current.as_ref().map(|song| song.id) else {
+            self.set_status(
+                NoticeLevel::Warning,
+                tr(self.lang, "No track is playing.", "没有正在播放的歌曲。"),
+            );
+            return;
+        };
+        if !self.auth.logged_in || self.auth.session_expired {
+            self.set_status(
+                NoticeLevel::Warning,
+                tr(self.lang, "Log in to like songs.", "登录后才能喜欢歌曲。"),
+            );
+            return;
+        }
+        if self.like_pending {
+            return;
+        }
+        self.like_pending = true;
+        self.liked_generation = self.liked_generation.wrapping_add(1);
+        self.liked_request = Some(song_id);
+        self.send(RequestKind::ToggleLike { song_id }, Command::ToggleLike);
     }
 
     fn move_selection(&mut self, delta: isize) {

@@ -896,6 +896,38 @@ impl Daemon {
                 )
                 .await
             }
+            Command::GetLiked { song_id } => {
+                let name = {
+                    let state = self.inner.state.read().await;
+                    state
+                        .queue
+                        .current()
+                        .filter(|item| item.song.id == song_id)
+                        .map(|item| item.song.name.clone())
+                        .unwrap_or_default()
+                };
+                Ok(CommandResult::Liked {
+                    song_id,
+                    name,
+                    liked: self.inner.api.is_song_liked(song_id).await?,
+                })
+            }
+            Command::ToggleLike => {
+                let (song_id, name) = {
+                    let state = self.inner.state.read().await;
+                    let item = state
+                        .queue
+                        .current()
+                        .ok_or_else(|| ServiceError::Invalid("No current song to like.".into()))?;
+                    (item.song.id, item.song.name.clone())
+                };
+                let liked = self.inner.api.toggle_song_liked(song_id).await?;
+                Ok(CommandResult::Liked {
+                    song_id,
+                    name,
+                    liked,
+                })
+            }
             Command::ClearCache => {
                 let before = self.inner.cache.size_bytes();
                 self.inner
