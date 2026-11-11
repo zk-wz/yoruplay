@@ -18,7 +18,7 @@ fi
 cargo build --release
 install -Dm755 target/release/yoruplay "$HOME/.local/bin/yoruplay"
 
-cat <<MSG
+cat <<'MSG'
 
 Installed "$HOME/.local/bin/yoruplay"
 No systemd unit or autostart entry was created.
