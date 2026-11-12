@@ -32,7 +32,7 @@ use crate::{
 
 const IO_BLOCK: usize = 64 * 1024;
 const MAX_RANGES: usize = 4096;
-const MAX_TAG_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TAG_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MOOV_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -91,8 +91,9 @@ struct Shared {
     cache: AudioCache,
     cache_epoch: u64,
     song: Song,
+    cover_url: Option<String>,
     stream: yoruplay_api::StreamUrl,
-    metadata: CacheMetadata,
+    metadata: Mutex<Option<CacheMetadata>>,
     current_url: Mutex<(yoruplay_api::StreamUrl, std::time::Instant)>,
     retry_budget: Arc<AtomicU32>,
     cancel_epoch: AtomicU64,
@@ -308,6 +309,12 @@ fn finalize_complete(
     let stop = Finalization { shared, epoch };
     stop.check()?;
     verify_complete(&file, format, length, expected, true, Some(stop))?;
+    let metadata = shared
+        .metadata
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .unwrap_or_default();
     let rewrite_reservation = length.saturating_add(MAX_TAG_BYTES as u64);
     let mut retained_rewrite_reservation = None;
     let final_file = if shared.cache.reserve(rewrite_reservation).unwrap_or(false) {
@@ -321,7 +328,7 @@ fn finalize_complete(
             length,
             format,
             &shared.song,
-            &shared.metadata,
+            &metadata,
             stop,
         );
         match tagged {
@@ -353,24 +360,22 @@ fn finalize_complete(
         format: format.extension().into(),
         bytes,
         completed_at_ms: now_ms(),
+        version: 0,
         path: Default::default(),
-        lyrics: shared.metadata.lyrics.clone(),
-        translated_lyrics: shared.metadata.translated_lyrics.clone(),
+        lyrics: metadata.lyrics.clone(),
+        translated_lyrics: metadata.translated_lyrics.clone(),
         artwork: None,
         artwork_bytes: 0,
+        cover_url: shared.cover_url.clone(),
     };
     let credit = reservation.saturating_add(
         retained_rewrite_reservation
             .as_ref()
             .map_or(0, |guard| guard.bytes),
     );
-    shared.cache.publish(
-        final_file,
-        entry,
-        shared.metadata.artwork.as_deref(),
-        credit,
-        stop,
-    )
+    shared
+        .cache
+        .publish(final_file, entry, metadata.artwork.as_deref(), credit, stop)
 }
 
 impl Transfer {
@@ -404,8 +409,9 @@ impl Transfer {
         for artist in &mut song.artists {
             truncate_text(artist, 1024);
         }
+        let cover_url = song.cover_url.clone();
         song.cover_url = None;
-        let file = anonymous_file(cache.directory())?;
+        let file = anonymous_file(cache.audio_dir())?;
         let expected_md5 = stream.md5.as_deref().map(parse_md5).transpose()?;
         let retry_budget = options
             .retry_budget
@@ -420,8 +426,9 @@ impl Transfer {
             publication_gate: Mutex::new(()),
             cache,
             song,
+            cover_url,
             stream,
-            metadata,
+            metadata: Mutex::new(Some(metadata)),
             options,
             state: Mutex::new(State {
                 file: Some(file),
@@ -1868,7 +1875,7 @@ fn rewrite_tags(
     stop: Finalization<'_>,
 ) -> Result<File, CacheError> {
     let bytes = tag_bytes(format, song, metadata)?;
-    let mut output = anonymous_file(cache.directory())?;
+    let mut output = anonymous_file(cache.audio_dir())?;
     match format {
         Format::Mp3 | Format::Aac => {
             let offset = leading_id3_size(source, length)?;
@@ -3152,5 +3159,60 @@ mod tests {
         assert_eq!(cache.info().unwrap()["reserved_bytes"], 0);
         assert!(candidate.finish().await.unwrap().is_none());
         assert_eq!(cache.lookup(30).unwrap().unwrap().entry.path, original);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publish_uses_split_layout_and_keeps_cover_url() {
+        let data = wav_bytes(1024);
+        let server = server(data.clone(), false).await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = AudioCache::open(root.path().to_path_buf(), 8 * 1024 * 1024, true).unwrap();
+        let mut song = song(40);
+        song.cover_url = Some("https://p1.music.126.net/a.jpg".into());
+        let metadata = CacheMetadata {
+            artwork: Some(b"\xff\xd8\xff\xe0cover".to_vec()),
+            ..Default::default()
+        };
+        let transfer = cache
+            .start(song, stream(&server.url, &data), metadata, options())
+            .await
+            .unwrap();
+        transfer.download_complete().await.unwrap();
+        let entry = transfer.finish().await.unwrap().unwrap();
+
+        assert!(entry.path.starts_with(root.path().join("audio")));
+        assert!(entry
+            .artwork
+            .as_ref()
+            .unwrap()
+            .starts_with(root.path().join("artwork")));
+        assert!(root
+            .path()
+            .join("meta")
+            .join(format!("{}-{}.json", entry.song.id, entry.version))
+            .exists());
+        assert_eq!(
+            entry.cover_url.as_deref(),
+            Some("https://p1.music.126.net/a.jpg")
+        );
+    }
+
+    #[test]
+    fn tag_bytes_embeds_artwork() {
+        let artwork = b"\xff\xd8\xff\xe0UNIQUE-COVER".to_vec();
+        let with = tag_bytes(
+            Format::Mp3,
+            &song(1),
+            &CacheMetadata {
+                artwork: Some(artwork.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let without = tag_bytes(Format::Mp3, &song(1), &CacheMetadata::default()).unwrap();
+        assert!(with
+            .windows(artwork.len())
+            .any(|window| window == artwork.as_slice()));
+        assert!(with.len() > without.len());
     }
 }

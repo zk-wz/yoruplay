@@ -64,8 +64,9 @@ Symphonia 0.5.5.
 
 Daemon startup reads saved account state but does not validate it online. TUI
 startup does not automatically fetch daily recommendations. Local audio uses
-stored lyrics/artwork only; MPRIS publishes local file artwork, not a remote URL.
-A missing cached lyric/cover stays missing. Device reopen is local.
+stored lyrics; MPRIS publishes local file artwork, not a remote URL. A missing
+cached cover is fetched alone from the image CDN; a missing lyric stays missing.
+Local playback never resolves audio URLs or fetches lyrics. Device reopen is local.
 
 Local-only queues reject a missing entry rather than downloading it. Actual local
 sources do not automatically replenish FM or Heartbeat over the network. Explicit
@@ -125,9 +126,11 @@ snapshots. The client limits normal/urgent in-flight requests independently.
 - `metadata/` holds TTL JSON responses, independently bounded by `cache.max_mb`
   (32 MiB default). Legacy recognized JSON cache files migrate locally. Logs are
   never metadata-cache eviction candidates.
-- `audio/` holds complete native-format audio, manifests, bounded optional local
-  artwork and redb 2.4.0 with an explicit 1 MiB page cache. An ordered completion
-  index provides FIFO eviction; local playback does not refresh age.
+- The cache root (`~/.cache/yoruplay`) holds `audio/` (complete native-format
+  audio), `artwork/` (bounded local covers), `meta/` (per-entry recovery
+  manifests), `index.redb` (redb 2.4.0 with an explicit 1 MiB page cache) and
+  `cache.lock`, alongside `metadata/` and the logs. An ordered completion index
+  provides FIFO eviction; local playback does not refresh age.
 - Audio budget defaults to 10 GiB. Pins, reservations, artwork, scratch and
   over-budget state are reported honestly. Pins can delay quota trimming; release
   immediately retries it. Oversize/nonretained playback uses a bounded anonymous

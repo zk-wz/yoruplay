@@ -98,10 +98,22 @@ impl Paths {
 
     pub fn audio_dir(&self, config: &Config) -> PathBuf {
         if config.cache.audio.dir.is_empty() {
-            self.cache_dir.join("audio")
+            self.cache_dir.clone()
         } else {
             PathBuf::from(&config.cache.audio.dir)
         }
+    }
+
+    pub fn audio_files_dir(&self, config: &Config) -> PathBuf {
+        self.audio_dir(config).join("audio")
+    }
+
+    pub fn artwork_dir(&self, config: &Config) -> PathBuf {
+        self.audio_dir(config).join("artwork")
+    }
+
+    pub fn manifest_dir(&self, config: &Config) -> PathBuf {
+        self.audio_dir(config).join("meta")
     }
 
     pub fn audio_index_file(&self, config: &Config) -> PathBuf {
@@ -231,29 +243,49 @@ impl Paths {
             "Atomic metadata writes",
             "renamed on commit",
         );
+        if audio != self.cache_dir {
+            add(
+                audio.clone(),
+                "directory",
+                "Configured audio cache root",
+                "managed cache only; directory changes require restart",
+            );
+        }
         add(
-            audio.clone(),
+            audio.join("audio"),
             "directory",
-            "Configured audio cache directory",
-            "managed audio only; directory changes require restart",
-        );
-        add(
-            audio.join("<id> - <artist> - <title> [<quality>]*.<ext>"),
-            "pattern",
             "Complete native-format audio",
             "FIFO eviction; pinned readers retain their inode",
         );
         add(
-            audio.join("*.<ext>.entry.json"),
+            audio.join("audio/<id> - <artist> - <title> [<quality>]*.<ext>"),
             "pattern",
-            "Complete-entry recovery manifests",
+            "Complete native-format audio files",
+            "FIFO eviction; pinned readers retain their inode",
+        );
+        add(
+            audio.join("artwork"),
+            "directory",
+            "Bounded local artwork",
+            "removed with its owning cache entry",
+        );
+        add(
+            audio.join("artwork/<id>-<version>.<png|jpg>"),
+            "pattern",
+            "Bounded local artwork files",
+            "removed with its owning cache entry",
+        );
+        add(
+            audio.join("meta"),
+            "directory",
+            "Per-entry recovery manifests",
             "streamed offline inspection; removed with managed audio",
         );
         add(
-            audio.join("<id>-<version>.<png|jpg>"),
+            audio.join("meta/<id>-<version>.json"),
             "pattern",
-            "Bounded local artwork",
-            "removed with its owning cache entry",
+            "Per-entry recovery manifests",
+            "streamed offline inspection; removed with managed audio",
         );
         add(
             audio.join(".capability-*-*"),

@@ -156,12 +156,13 @@ Default cache root is `$XDG_CACHE_HOME/yoruplay`, falling back to
 FIFO deletion must never accidentally treat a user's music collection as disposable.
 
 ```text
-cache-root/
+cache-root/                           # ~/.cache/yoruplay
   metadata/                           # existing TTL JSON cache, 32 MiB default
-  audio/
-    <id> - <artist> - <title> [<actual-quality>]-<version>.<ext>
-    artwork/<id>-<version>.<ext>        # optional, bounded, local MPRIS artwork
-    index.redb                        # complete-entry metadata and age ordering
+  audio/<id> - <artist> - <title> [<actual-quality>]-<version>.<ext>
+  artwork/<id>-<version>.<ext>        # optional, bounded, local MPRIS artwork
+  meta/<id>-<version>.json            # per-entry recovery manifest
+  index.redb                          # complete-entry metadata and age ordering
+  cache.lock                          # cache ownership lock
   yoruplay.log                        # not cache data; never cache-clear/trimmed
   tui.log                             # not cache data; never cache-clear/trimmed
 ```
@@ -176,7 +177,8 @@ cache-root/
   size, completion timestamp, Song display metadata, optional local lyrics/art.
   An ordered `(completed_at, id)` table makes FIFO eviction incremental.
 - Page cache list operations. No artwork decoding and no full file reads to list
-  entries. Missing embedded lyrics/cover remain missing offline.
+  entries. Missing embedded lyrics remain missing offline; missing local artwork
+  is fetched alone from the image CDN.
 - Index/file publication cannot form one filesystem transaction. Startup/local
   reconciliation must handle complete orphan files and stale/missing index paths;
   never trust an index record alone as proof that audio exists.
@@ -184,8 +186,10 @@ cache-root/
   and supported Ogg/WAV. Do not label arbitrary AAC as M4A or unknown data as MP3.
 - Bounded text tags, original/translated lyrics and optional embedded pictures
   accompany native-format publication where the container supports them.
-  Metadata limits are lyrics 128 KiB and artwork 512 KiB; reuse fetched metadata.
-  Whole-audio buffering is unacceptable; tag updates use a bounded disk rewrite.
+  Metadata limits are lyrics 128 KiB, artwork 2.5 MiB and tag serialization
+  4 MiB; reuse fetched metadata. NetEase covers are requested at 1024×1024 via
+  the image CDN's `?param=1024y1024` query. Whole-audio buffering is unacceptable;
+  tag updates use a bounded disk rewrite.
 
 ## 4. Budget, eviction and space failures
 
@@ -230,6 +234,8 @@ Required changes beyond audio resolution:
   TTL expiry. Missing lyrics never initiate a fetch.
 - MPRIS `mpris:artUrl` is a local file URI or absent for local sources. Never pass
   a remote cover URL that encourages the desktop to fetch on the user's behalf.
+  Missing local artwork is fetched alone from the image CDN; local playback never
+  resolves audio URLs or fetches lyrics.
 - Pause/resume/seek/repeat/device reopen/error recovery of a local source stay local.
   A corrupt selected local file reports a local error, not silent network fallback.
 - Local-only cached playback does not refill Personal FM/Heartbeat over the API;
@@ -393,7 +399,7 @@ level = "info"
 - Hot/next-operation: audio/metadata budgets (trim now), audio enabled, lyrics TTL,
   request quality (next network resolution), buffer settings (next source).
 - Restart boundary: API client timeout and logging require process restart;
-  language requires TUI restart; audio directory requires daemon restart and no
+  language requires TUI restart; audio cache root requires daemon restart and no
   automatic migration/deletion of the old directory. Output-device change applies
   on the next explicit device reopen/source load.
 - `playback.volume/default_mode` remain startup defaults: restored state wins.
@@ -415,7 +421,7 @@ Required inventory:
   atomic-write patterns and corrupt/recovery files; include the v1 migration
   lifecycle and retained queue revisions.
 - Cache root, isolated metadata directory and its JSON/temp patterns.
-- Active/configured audio directory, audio naming pattern, artwork, `index.redb`,
+- Active/configured audio cache root, audio naming pattern, artwork, `index.redb`,
   cache ownership lock. Anonymous staging/scratch is labelled unnamed/inode-only,
   with its backing directory; do not invent a `.part` path.
 - Daemon/TUI log files and any rotation patterns actually implemented.

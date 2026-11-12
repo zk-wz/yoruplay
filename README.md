@@ -240,8 +240,9 @@ The daemon is the only MPRIS owner; no separate audio-player process is started.
 Use Noctalia Media or any MPRIS client to play/pause, seek, change volume and
 skip tracks. Metadata includes title, artists, album, cover, duration, stable
 track ID and current plain-text lyrics (`xesam:asText`) when available. Local
-playback exposes only locally stored artwork/lyrics; missing metadata never
-triggers a network fetch. Lyrics failures never affect playback.
+playback publishes a local `file://` artwork file; missing artwork is fetched
+alone from the image CDN, while missing lyrics are not fetched. Local playback
+never resolves audio URLs. Lyrics failures never affect playback.
 
 MPRIS loop/shuffle is only an approximation for the five internal modes:
 
@@ -269,7 +270,11 @@ inspection does not create missing files or start a daemon.
 ~/.local/share/yoruplay/queue-*.json     # versioned queue, 0600
 ~/.local/share/yoruplay/daemon.lock      # 0600: global daemon ownership
 ~/.cache/yoruplay/metadata/            # independent TTL JSON cache
-~/.cache/yoruplay/audio/               # native audio, manifests, artwork, index
+~/.cache/yoruplay/audio/               # native audio files
+~/.cache/yoruplay/artwork/             # bounded local covers
+~/.cache/yoruplay/meta/                # per-entry recovery manifests
+~/.cache/yoruplay/index.redb           # complete-entry index
+~/.cache/yoruplay/cache.lock           # cache ownership lock
 ~/.cache/yoruplay/{yoruplay,tui}.log
 $XDG_RUNTIME_DIR/yoruplay/             # 0700: IPC socket
 ```

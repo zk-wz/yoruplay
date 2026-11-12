@@ -1,6 +1,6 @@
 //! Local, FIFO-managed audio storage. Network acquisition lives in `transfer`.
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     os::fd::AsRawFd,
@@ -26,7 +26,7 @@ const ENTRIES: TableDefinition<u64, &[u8]> = TableDefinition::new("audio_entries
 const AGE: TableDefinition<(u64, u64), u64> = TableDefinition::new("audio_fifo_v1");
 const MAX_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const MAX_LYRICS: usize = 128 * 1024;
-pub(crate) const MAX_ARTWORK: usize = 512 * 1024;
+pub(crate) const MAX_ARTWORK: usize = 2_621_440;
 const MAX_LIST_ITEMS: usize = 100;
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024 - 1024;
 
@@ -91,12 +91,16 @@ pub struct CacheEntry {
     pub format: String,
     pub bytes: u64,
     pub completed_at_ms: u64,
+    #[serde(default)]
+    pub version: u64,
     pub path: PathBuf,
     pub lyrics: Option<String>,
     pub translated_lyrics: Option<String>,
     pub artwork: Option<PathBuf>,
     #[serde(default)]
     pub artwork_bytes: u64,
+    #[serde(default)]
+    pub cover_url: Option<String>,
 }
 
 /// List DTO: serde ignores lyric fields in index/manifest records, rather than
@@ -109,6 +113,8 @@ pub struct CacheSummary {
     pub format: String,
     pub bytes: u64,
     pub completed_at_ms: u64,
+    #[serde(default)]
+    pub version: u64,
     pub path: PathBuf,
     pub artwork: Option<PathBuf>,
     #[serde(default)]
@@ -154,6 +160,9 @@ pub struct AudioCache {
 
 pub(crate) struct CacheInner {
     pub(crate) dir: PathBuf,
+    pub(crate) audio_dir: PathBuf,
+    pub(crate) artwork_dir: PathBuf,
+    pub(crate) meta_dir: PathBuf,
     db: Database,
     _process_lock: File,
     pub(crate) http: reqwest::Client,
@@ -232,6 +241,12 @@ impl AudioCache {
     pub fn open(dir: PathBuf, max_bytes: u64, enabled: bool) -> Result<Self, CacheError> {
         fs::create_dir_all(&dir)?;
         let dir = fs::canonicalize(dir)?;
+        let audio_dir = dir.join("audio");
+        let artwork_dir = dir.join("artwork");
+        let meta_dir = dir.join("meta");
+        for path in [&audio_dir, &artwork_dir, &meta_dir] {
+            fs::create_dir_all(path)?;
+        }
         let process_lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -272,6 +287,9 @@ impl AudioCache {
         let cache = Self {
             inner: Arc::new(CacheInner {
                 dir,
+                audio_dir,
+                artwork_dir,
+                meta_dir,
                 db,
                 _process_lock: process_lock,
                 http,
@@ -300,6 +318,9 @@ impl AudioCache {
     pub fn directory(&self) -> &Path {
         &self.inner.dir
     }
+    pub(crate) fn audio_dir(&self) -> &Path {
+        &self.inner.audio_dir
+    }
     pub(crate) fn epoch(&self) -> u64 {
         self.inner.epoch.load(Ordering::Acquire)
     }
@@ -327,6 +348,8 @@ impl AudioCache {
             "scratch_bytes": 0, "max_bytes": max_bytes, "limit_bytes": max_bytes,
             "entry_count": count, "pinned_bytes": 0, "over_budget_bytes": bytes.saturating_sub(max_bytes),
             "over_budget": bytes > max_bytes, "index_bytes": local_file_bytes(&dir.join("index.redb"))?,
+            "audio_files_dir": dir.join("audio"), "artwork_dir": dir.join("artwork"),
+            "manifest_dir": dir.join("meta"),
         }))
     }
 
@@ -406,7 +429,9 @@ impl AudioCache {
         let Some(entry) = self.read_entry(id)? else {
             return Ok(None);
         };
-        if self.valid_entry(&entry) {
+        if self.audio_file_valid(&entry)
+            && (self.manifest_file_valid(&entry) || self.ensure_manifest(&entry).is_ok())
+        {
             return Ok(Some(entry));
         }
         self.remove_record(&entry)?;
@@ -421,12 +446,22 @@ impl AudioCache {
         let Some(entry) = self.read_entry(id)? else {
             return Ok(None);
         };
-        if !self.valid_entry(&entry) {
+        if !self.audio_file_valid(&entry) {
             self.remove_record(&entry)?;
             state.retained = state.retained.saturating_sub(self.entry_bytes(&entry));
             state.entries = state.entries.saturating_sub(1);
             self.remove_files(&entry)?;
             return Ok(None);
+        }
+        if !self.manifest_file_valid(&entry) {
+            if let Err(error) = self.ensure_manifest(&entry) {
+                tracing::warn!(song = entry.song.id, error = %error, "无法重建缓存清单");
+                self.remove_record(&entry)?;
+                state.retained = state.retained.saturating_sub(self.entry_bytes(&entry));
+                state.entries = state.entries.saturating_sub(1);
+                self.remove_files(&entry)?;
+                return Ok(None);
+            }
         }
         let file = File::open(&entry.path)?;
         let pin = self.pin_locked(&mut state, &entry);
@@ -473,6 +508,9 @@ impl AudioCache {
             "over_budget": used > state.limit,
             "memory_backed": self.inner.memory_backed,
             "index_bytes": local_file_bytes(&self.inner.dir.join("index.redb"))?,
+            "audio_files_dir": self.inner.audio_dir,
+            "artwork_dir": self.inner.artwork_dir,
+            "manifest_dir": self.inner.meta_dir,
         }))
     }
 
@@ -552,7 +590,10 @@ impl AudioCache {
         let old_pin = {
             let mut state = lock(&self.inner.state);
             self.read_entry(song.id)?
-                .filter(|entry| self.valid_entry(entry))
+                .filter(|entry| {
+                    self.audio_file_valid(entry)
+                        && (self.manifest_file_valid(entry) || self.ensure_manifest(entry).is_ok())
+                })
                 .map(|entry| self.pin_locked(&mut state, &entry))
         };
         let transfer = Transfer::start(
@@ -737,7 +778,8 @@ impl AudioCache {
         let previous = self.read_entry(entry.song.id)?;
         entry.completed_at_ms = now_ms().max(state.last_completed_ms.saturating_add(1));
         state.last_completed_ms = entry.completed_at_ms;
-        let version = now_ns();
+        let version = now_ns() as u64;
+        entry.version = version;
         let filename = format!(
             "{} - {} - {} [{}]-{}.{}",
             entry.song.id,
@@ -747,15 +789,15 @@ impl AudioCache {
             version,
             entry.format
         );
-        entry.path = self.inner.dir.join(filename);
+        entry.path = self.inner.audio_dir.join(filename);
         file.sync_all()?;
         // A manifest is the durable, bounded recovery record for a fully verified inode.
         // It is linked first; a crash before the audio link leaves only a removable manifest.
         let art_file = if let Some(data) = artwork {
-            let art = anonymous_file(&self.inner.dir)?;
+            let art = anonymous_file(&self.inner.artwork_dir)?;
             (&art).write_all(data)?;
             art.sync_all()?;
-            entry.artwork = Some(self.inner.dir.join(format!(
+            entry.artwork = Some(self.inner.artwork_dir.join(format!(
                 "{}-{}.{}",
                 entry.song.id,
                 version,
@@ -766,20 +808,24 @@ impl AudioCache {
         } else {
             None
         };
-        let manifest = anonymous_file(&self.inner.dir)?;
+        let manifest = anonymous_file(&self.inner.meta_dir)?;
         serde_json::to_writer(&manifest, &entry).map_err(index_error)?;
         manifest.sync_all()?;
         let publication = (|| -> Result<(), CacheError> {
             stop.check()?;
-            link_anonymous(&manifest, &manifest_path(&entry.path))?;
+            link_anonymous(
+                &manifest,
+                &manifest_path(&self.inner.dir, entry.song.id, entry.version),
+            )?;
             // Persist the recovery record before any complete audio/art link
             // can survive a crash independently of it.
-            File::open(&self.inner.dir)?.sync_all()?;
+            File::open(&self.inner.meta_dir)?.sync_all()?;
             if let (Some(art), Some(path)) = (&art_file, &entry.artwork) {
                 link_anonymous(art, path)?;
+                File::open(&self.inner.artwork_dir)?.sync_all()?;
             }
             link_anonymous(&file, &entry.path)?;
-            File::open(&self.inner.dir)?.sync_all()?;
+            File::open(&self.inner.audio_dir)?.sync_all()?;
             stop.commit(|| self.insert_record(&entry))
         })();
         if let Err(error) = publication {
@@ -809,18 +855,168 @@ impl AudioCache {
         entry.bytes.saturating_add(entry.artwork_bytes)
     }
 
-    fn valid_entry(&self, entry: &CacheEntry) -> bool {
+    fn audio_file_valid(&self, entry: &CacheEntry) -> bool {
         managed_path(&self.inner.dir, &entry.path)
             && entry.bytes > 0
-            && fs::symlink_metadata(manifest_path(&entry.path))
-                .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= MAX_RECORD_BYTES)
             && fs::symlink_metadata(&entry.path)
                 .is_ok_and(|meta| meta.file_type().is_file() && meta.len() == entry.bytes)
     }
 
+    fn manifest_file_valid(&self, entry: &CacheEntry) -> bool {
+        let path = manifest_path(&self.inner.dir, entry.song.id, entry.version);
+        managed_path(&self.inner.dir, &path)
+            && fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= MAX_RECORD_BYTES)
+    }
+
+    pub(crate) fn artwork_file_valid(&self, entry: &CacheEntry) -> bool {
+        let Some(path) = &entry.artwork else {
+            return false;
+        };
+        if !managed_path(&self.inner.dir, path) {
+            return false;
+        }
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return false;
+        };
+        if !meta.file_type().is_file() || meta.len() == 0 {
+            return false;
+        }
+        let Ok(mut file) = File::open(path) else {
+            return false;
+        };
+        let mut header = [0_u8; 8];
+        let Ok(read) = file.read(&mut header) else {
+            return false;
+        };
+        artwork_extension(&header[..read]).is_some()
+    }
+
+    fn write_manifest(&self, entry: &CacheEntry) -> Result<(), CacheError> {
+        let path = manifest_path(&self.inner.dir, entry.song.id, entry.version);
+        let mut file = anonymous_file(&self.inner.meta_dir)?;
+        serde_json::to_writer(&mut file, entry).map_err(index_error)?;
+        file.sync_all()?;
+        remove_if_present(&path)?;
+        link_anonymous(&file, &path)?;
+        File::open(&self.inner.meta_dir)?.sync_all()?;
+        Ok(())
+    }
+
+    fn ensure_manifest(&self, entry: &CacheEntry) -> Result<(), CacheError> {
+        if self.manifest_file_valid(entry) {
+            Ok(())
+        } else {
+            self.write_manifest(entry)
+        }
+    }
+
+    pub(crate) fn attach_artwork(
+        &self,
+        entry: &CacheEntry,
+        data: &[u8],
+    ) -> Result<CacheEntry, CacheError> {
+        let extension = artwork_extension(data)
+            .ok_or_else(|| CacheError::Integrity("封面不是 PNG/JPEG".into()))?;
+        let Some(current) = self.read_entry(entry.song.id)? else {
+            return Err(CacheError::Cancelled);
+        };
+        if current.version != entry.version || current.path != entry.path {
+            return Err(CacheError::Cancelled);
+        }
+        let path = self
+            .inner
+            .artwork_dir
+            .join(format!("{}-{}.{}", entry.song.id, entry.version, extension));
+        if !managed_path(&self.inner.dir, &path) {
+            return Err(CacheError::Integrity("封面路径越界".into()));
+        }
+        let file = anonymous_file(&self.inner.artwork_dir)?;
+        (&file).write_all(data)?;
+        file.sync_all()?;
+        remove_if_present(&path)?;
+        link_anonymous(&file, &path)?;
+        File::open(&self.inner.artwork_dir)?.sync_all()?;
+        let Some(current) = self.read_entry(entry.song.id)? else {
+            let _ = remove_if_present(&path);
+            return Err(CacheError::Cancelled);
+        };
+        if current.version != entry.version || current.path != entry.path {
+            let _ = remove_if_present(&path);
+            return Err(CacheError::Cancelled);
+        }
+        let old_artwork = current.artwork.clone();
+        let old_artwork_bytes = current.artwork_bytes;
+        let mut updated = current;
+        updated.artwork = Some(path.clone());
+        updated.artwork_bytes = data.len() as u64;
+        self.write_manifest(&updated)?;
+        self.insert_record(&updated)?;
+        if let Some(old) = old_artwork {
+            if old != path && managed_path(&self.inner.dir, &old) {
+                if let Err(error) = remove_if_present(&old) {
+                    tracing::warn!(path = %old.display(), error = %error, "无法删除旧封面");
+                } else {
+                    File::open(&self.inner.artwork_dir)?.sync_all()?;
+                }
+            }
+        }
+        let mut state = lock(&self.inner.state);
+        state.retained = state
+            .retained
+            .saturating_sub(old_artwork_bytes)
+            .saturating_add(updated.artwork_bytes);
+        Ok(updated)
+    }
+
+    fn cleanup_orphans(&self) -> Result<(), CacheError> {
+        self.cleanup_orphans_with_grace(std::time::Duration::from_secs(3600))
+    }
+
+    fn cleanup_orphans_with_grace(&self, grace: std::time::Duration) -> Result<(), CacheError> {
+        let mut referenced = HashSet::new();
+        {
+            let transaction = self.inner.db.begin_read().map_err(index_error)?;
+            let entries = transaction.open_table(ENTRIES).map_err(index_error)?;
+            for row in entries.iter().map_err(index_error)? {
+                let (_, value) = row.map_err(index_error)?;
+                let entry: CacheEntry =
+                    serde_json::from_slice(value.value()).map_err(index_error)?;
+                referenced.insert(entry.path);
+                if let Some(artwork) = entry.artwork {
+                    referenced.insert(artwork);
+                }
+            }
+        }
+        let pinned: HashSet<PathBuf> = lock(&self.inner.state).pins.keys().cloned().collect();
+        for dir in [&self.inner.audio_dir, &self.inner.artwork_dir] {
+            for row in fs::read_dir(dir)? {
+                let row = row?;
+                if !row.file_type()?.is_file() {
+                    continue;
+                }
+                let path = row.path();
+                if referenced.contains(&path) || pinned.contains(&path) {
+                    continue;
+                }
+                let Ok(modified) = row.metadata().and_then(|meta| meta.modified()) else {
+                    continue;
+                };
+                let Ok(age) = modified.elapsed() else {
+                    continue;
+                };
+                if age < grace {
+                    continue;
+                }
+                remove_if_present(&path)?;
+            }
+            File::open(dir)?.sync_all()?;
+        }
+        Ok(())
+    }
+
     fn remove_files(&self, entry: &CacheEntry) -> Result<(), CacheError> {
         if managed_path(&self.inner.dir, &entry.path) {
-            remove_if_present(&manifest_path(&entry.path))?;
             remove_if_present(&entry.path)?;
         }
         if let Some(art) = &entry.artwork {
@@ -828,17 +1024,29 @@ impl AudioCache {
                 remove_if_present(art)?;
             }
         }
+        let manifest = manifest_path(&self.inner.dir, entry.song.id, entry.version);
+        if managed_path(&self.inner.dir, &manifest) {
+            remove_if_present(&manifest)?;
+        }
         // Make interrupted eviction non-resurrecting before its index removal.
-        File::open(&self.inner.dir)?.sync_all()?;
+        for dir in [
+            &self.inner.meta_dir,
+            &self.inner.audio_dir,
+            &self.inner.artwork_dir,
+        ] {
+            if let Ok(dir) = File::open(dir) {
+                dir.sync_all()?;
+            }
+        }
         Ok(())
     }
 
     fn reconcile(&self) -> Result<(), CacheError> {
         // Scan manifests incrementally. No tags, covers or whole index are loaded.
-        for item in fs::read_dir(&self.inner.dir)? {
+        for item in fs::read_dir(&self.inner.meta_dir)? {
             let item = item?;
             if !item.file_type()?.is_file()
-                || !item.file_name().to_string_lossy().ends_with(".entry.json")
+                || !item.file_name().to_string_lossy().ends_with(".json")
             {
                 continue;
             }
@@ -852,12 +1060,16 @@ impl AudioCache {
                 Ok(entry) => entry,
                 Err(_) => continue,
             };
-            if manifest_path(&entry.path) != item.path()
+            if manifest_path(&self.inner.dir, entry.song.id, entry.version) != item.path()
                 || !managed_path(&self.inner.dir, &entry.path)
+                || entry
+                    .artwork
+                    .as_ref()
+                    .is_some_and(|art| !managed_path(&self.inner.dir, art))
             {
                 continue;
             }
-            if !self.valid_entry(&entry) {
+            if !self.audio_file_valid(&entry) {
                 self.remove_files(&entry)?;
                 continue;
             }
@@ -865,7 +1077,7 @@ impl AudioCache {
                 Some(current) if current.path == entry.path => {}
                 Some(current)
                     if current.completed_at_ms >= entry.completed_at_ms
-                        && self.valid_entry(&current) =>
+                        && self.audio_file_valid(&current) =>
                 {
                     self.remove_files(&entry)?;
                 }
@@ -907,7 +1119,22 @@ impl AudioCache {
             };
             let Some(entry) = entry else { break };
             after = Some(entry.song.id);
-            if self.valid_entry(&entry) {
+            let keep = if self.audio_file_valid(&entry) {
+                if self.manifest_file_valid(&entry) {
+                    true
+                } else {
+                    match self.ensure_manifest(&entry) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(song = entry.song.id, error = %error, "无法重建缓存清单");
+                            false
+                        }
+                    }
+                }
+            } else {
+                false
+            };
+            if keep {
                 let mut state = lock(&self.inner.state);
                 state.retained = state.retained.saturating_add(self.entry_bytes(&entry));
                 state.entries += 1;
@@ -920,6 +1147,7 @@ impl AudioCache {
                 break;
             }
         }
+        self.cleanup_orphans()?;
         Ok(())
     }
 }
@@ -950,13 +1178,24 @@ pub(crate) fn link_anonymous(file: &File, destination: &Path) -> Result<(), Cach
     )
     .map_err(|error| CacheError::Io(error.into()))
 }
-fn managed_path(directory: &Path, path: &Path) -> bool {
-    path.parent() == Some(directory) && path.file_name().is_some()
+fn managed_path(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        return false;
+    };
+    let Some(std::path::Component::Normal(_)) = components.next() else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false;
+    }
+    matches!(first.to_str(), Some("audio" | "artwork" | "meta"))
 }
-fn manifest_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".entry.json");
-    PathBuf::from(name)
+fn manifest_path(root: &Path, id: u64, version: u64) -> PathBuf {
+    root.join("meta").join(format!("{id}-{version}.json"))
 }
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
@@ -1058,7 +1297,8 @@ fn visit_summaries(
         Err(error) => return Err(error.into()),
     };
     let directory = canonical.as_path();
-    let rows = match fs::read_dir(directory) {
+    let meta_dir = directory.join("meta");
+    let rows = match fs::read_dir(&meta_dir) {
         Ok(rows) => rows,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
@@ -1066,7 +1306,7 @@ fn visit_summaries(
     for row in rows {
         let row = row?;
         if !row.file_type()?.is_file()
-            || !row.file_name().to_string_lossy().ends_with(".entry.json")
+            || !row.file_name().to_string_lossy().ends_with(".json")
             || row.metadata()?.len() > MAX_RECORD_BYTES
         {
             continue;
@@ -1078,7 +1318,7 @@ fn visit_summaries(
             Ok(entry) => entry,
             Err(_) => continue,
         };
-        if manifest_path(&entry.path) == row.path()
+        if manifest_path(directory, entry.song.id, entry.version) == row.path()
             && managed_path(directory, &entry.path)
             && fs::symlink_metadata(&entry.path)
                 .is_ok_and(|m| m.file_type().is_file() && m.len() == entry.bytes)
@@ -1157,5 +1397,155 @@ mod tests {
         assert!(metadata.lyrics.unwrap().len() <= MAX_LYRICS);
         assert!(metadata.artwork.is_none());
         assert_eq!(safe_component("123/歌\\名", 20), "123_歌_名");
+    }
+
+    fn song(id: u64) -> Song {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": "title",
+            "artists": ["artist"],
+            "album": "album",
+            "cover_url": "https://p1.music.126.net/a.jpg",
+            "duration_ms": 1000
+        }))
+        .unwrap()
+    }
+
+    fn entry(cache: &AudioCache, id: u64) -> CacheEntry {
+        let version = 1_000 + id;
+        let path = cache
+            .audio_dir()
+            .join(format!("{id} - artist - title [exhigh]-{version}.mp3"));
+        fs::write(&path, b"audio").unwrap();
+        CacheEntry {
+            song: song(id),
+            quality: Some("exhigh".into()),
+            bitrate: 320_000,
+            format: "mp3".into(),
+            bytes: 5,
+            completed_at_ms: id,
+            version,
+            path,
+            lyrics: None,
+            translated_lyrics: None,
+            artwork: None,
+            artwork_bytes: 0,
+            cover_url: Some("https://p1.music.126.net/a.jpg".into()),
+        }
+    }
+
+    fn manifest(cache: &AudioCache, entry: &CacheEntry) -> PathBuf {
+        manifest_path(&cache.inner.dir, entry.song.id, entry.version)
+    }
+
+    #[test]
+    fn missing_manifest_is_rebuilt_without_losing_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = AudioCache::open(root.path().to_path_buf(), 1 << 20, true).unwrap();
+        let entry = entry(&cache, 1);
+        cache.write_manifest(&entry).unwrap();
+        cache.insert_record(&entry).unwrap();
+        let manifest = manifest(&cache, &entry);
+        fs::remove_file(&manifest).unwrap();
+
+        let cached = cache.lookup(1).unwrap().unwrap();
+        assert_eq!(cached.entry.song.id, 1);
+        assert!(entry.path.exists());
+        assert!(manifest.exists());
+    }
+
+    #[test]
+    fn missing_audio_removes_entry_and_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = AudioCache::open(root.path().to_path_buf(), 1 << 20, true).unwrap();
+        let entry = entry(&cache, 2);
+        cache.write_manifest(&entry).unwrap();
+        cache.insert_record(&entry).unwrap();
+        let manifest = manifest(&cache, &entry);
+        fs::remove_file(&entry.path).unwrap();
+
+        assert!(cache.lookup(2).unwrap().is_none());
+        assert!(!manifest.exists());
+        assert!(cache.read_entry(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn artwork_attach_updates_entry_and_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = AudioCache::open(root.path().to_path_buf(), 1 << 20, true).unwrap();
+        let entry = entry(&cache, 3);
+        cache.write_manifest(&entry).unwrap();
+        cache.insert_record(&entry).unwrap();
+        let jpeg = b"\xff\xd8\xff\xe0cover".to_vec();
+
+        let updated = cache.attach_artwork(&entry, &jpeg).unwrap();
+        let artwork = updated.artwork.as_ref().unwrap();
+        assert!(artwork.exists());
+        assert_eq!(updated.artwork_bytes, jpeg.len() as u64);
+        assert!(cache.artwork_file_valid(&updated));
+        assert_eq!(
+            cache.read_entry(3).unwrap().unwrap().artwork,
+            updated.artwork
+        );
+        let parsed: CacheEntry =
+            serde_json::from_slice(&fs::read(manifest(&cache, &updated)).unwrap()).unwrap();
+        assert_eq!(parsed.artwork, updated.artwork);
+    }
+
+    #[test]
+    fn artwork_validation_checks_magic_and_existence() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = AudioCache::open(root.path().to_path_buf(), 1 << 20, true).unwrap();
+        let mut entry = entry(&cache, 4);
+        let path = cache.inner.artwork_dir.join("4-1004.jpg");
+        fs::write(&path, b"\xff\xd8\xff\xe0cover").unwrap();
+        entry.artwork = Some(path.clone());
+        assert!(cache.artwork_file_valid(&entry));
+
+        fs::write(&path, b"not an image").unwrap();
+        assert!(!cache.artwork_file_valid(&entry));
+        fs::remove_file(&path).unwrap();
+        assert!(!cache.artwork_file_valid(&entry));
+    }
+
+    #[test]
+    fn orphan_cleanup_removes_only_unreferenced_files() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = AudioCache::open(root.path().to_path_buf(), 1 << 20, true).unwrap();
+        let entry = entry(&cache, 5);
+        cache.write_manifest(&entry).unwrap();
+        cache.insert_record(&entry).unwrap();
+        let orphan_audio = cache.audio_dir().join("orphan.mp3");
+        let orphan_artwork = cache.inner.artwork_dir.join("orphan.jpg");
+        fs::write(&orphan_audio, b"orphan").unwrap();
+        fs::write(&orphan_artwork, b"\xff\xd8\xff\xe0orphan").unwrap();
+
+        cache
+            .cleanup_orphans_with_grace(std::time::Duration::ZERO)
+            .unwrap();
+        assert!(entry.path.exists());
+        assert!(!orphan_audio.exists());
+        assert!(!orphan_artwork.exists());
+    }
+
+    #[test]
+    fn artwork_boundary_accepts_valid_image_at_limit() {
+        let mut data = b"\xff\xd8\xff\xe0".to_vec();
+        data.resize(MAX_ARTWORK, 0);
+        let metadata = CacheMetadata {
+            artwork: Some(data),
+            ..Default::default()
+        }
+        .bounded();
+        assert!(metadata.artwork.is_some());
+
+        let mut data = b"\xff\xd8\xff\xe0".to_vec();
+        data.resize(MAX_ARTWORK + 1, 0);
+        let metadata = CacheMetadata {
+            artwork: Some(data),
+            ..Default::default()
+        }
+        .bounded();
+        assert!(metadata.artwork.is_none());
     }
 }

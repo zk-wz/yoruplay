@@ -4,6 +4,8 @@
 //! queue helpers it calls). TUI, CLI and MPRIS therefore observe and mutate one
 //! authoritative queue and player state.
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -19,7 +21,7 @@ use yoruplay_protocol::{
 };
 
 use crate::audio::{AudioEngine, AudioError, AudioEvent, AudioInput, AudioOptions};
-use crate::audio_cache::{AudioCache, CacheEntry, CacheError, CacheMetadata};
+use crate::audio_cache::{AudioCache, CacheEntry, CacheError, CacheMetadata, MAX_ARTWORK};
 use crate::browser_login::{self, BrowserLoginError};
 use crate::cache::FileCache;
 use crate::queue::{Advance, Queue, QueueError, RemoveOutcome};
@@ -215,6 +217,7 @@ struct DaemonInner {
     audio_generation: AtomicU64,
     loading_source: AtomicU64,
     pending_audio_error: Mutex<Option<(u64, ServiceError)>>,
+    artwork_attempts: Mutex<HashSet<u64>>,
 }
 
 struct UpgradeState {
@@ -417,6 +420,7 @@ impl Daemon {
                 audio_generation: AtomicU64::new(0),
                 loading_source: AtomicU64::new(0),
                 pending_audio_error: Mutex::new(None),
+                artwork_attempts: Mutex::new(HashSet::new()),
             }),
         };
         let handler = daemon.clone();
@@ -1855,6 +1859,7 @@ impl Daemon {
                         byte_len: cached.byte_len,
                     }));
                 }
+                let mut repair_artwork: Option<(CacheEntry, String)> = None;
                 let (input, byte_len, quality, lyrics, artwork, source) = if let Some(transfer) = existing {
                     transfer.pause(false);
                     let state = self.inner.state.read().await;
@@ -1864,7 +1869,16 @@ impl Daemon {
                     *self.inner.local_source.lock().await = Some(local.clone());
                     let input = local.reader().map_err(AudioError::from)?;
                     let entry = &local.entry;
-                    let art = entry.artwork.as_ref().and_then(|p| reqwest::Url::from_file_path(p).ok()).map(|u| u.to_string());
+                    let art = if self.audio_cache()?.artwork_file_valid(entry) {
+                        entry.artwork.as_ref().and_then(|p| reqwest::Url::from_file_path(p).ok()).map(|u| u.to_string())
+                    } else {
+                        None
+                    };
+                    if art.is_none() {
+                        if let Some(cover_url) = entry.cover_url.clone().or_else(|| song.cover_url.clone()) {
+                            repair_artwork = Some((entry.clone(), cover_url));
+                        }
+                    }
                     (input, Some(local.byte_len), entry.quality.clone(), entry.lyrics.clone(), art, "local")
                 } else {
                     if selected_local || local_only {
@@ -1898,6 +1912,41 @@ impl Daemon {
                     state.actual_quality = quality;
                     state.local_artwork = artwork;
                     state.lyrics = lyrics.as_deref().map(plain_lyrics).filter(|s| !s.is_empty());
+                }
+                if let Some((entry, cover_url)) = repair_artwork {
+                    let daemon = self.clone();
+                    let cache = self.audio_cache()?.clone();
+                    tokio::spawn(async move {
+                        if !daemon.claim_artwork_attempt(entry.song.id).await {
+                            return;
+                        }
+                        let Some(bytes) = daemon.fetch_artwork(Some(&cover_url)).await else {
+                            return;
+                        };
+                        if daemon.current_generation() != generation {
+                            return;
+                        }
+                        let Ok(updated) = cache.attach_artwork(&entry, &bytes) else {
+                            return;
+                        };
+                        let Some(path) = updated.artwork.as_ref() else {
+                            return;
+                        };
+                        let Ok(url) = reqwest::Url::from_file_path(path) else {
+                            return;
+                        };
+                        let mut state = daemon.inner.state.write().await;
+                        if daemon.current_generation() == generation
+                            && state
+                                .queue
+                                .current()
+                                .is_some_and(|item| item.song.id == entry.song.id)
+                        {
+                            state.local_artwork = Some(url.to_string());
+                        }
+                        drop(state);
+                        daemon.publish_playback().await;
+                    });
                 }
                 let engine = AudioEngine::spawn(AudioOptions { device: config.playback.audio_device.clone(), pcm_buffer_ms: config.playback.pcm_buffer_ms }).await?;
                 let mut events = engine.subscribe();
@@ -2084,31 +2133,55 @@ impl Daemon {
         }
     }
 
+    async fn claim_artwork_attempt(&self, id: u64) -> bool {
+        self.inner.artwork_attempts.lock().await.insert(id)
+    }
+
     async fn fetch_artwork(&self, url: Option<&str>) -> Option<Vec<u8>> {
-        let url = url?;
-        let response = self
+        let url = resize_cover_url(url?);
+        let response = match self
             .inner
             .metadata_http
-            .get(url)
+            .get(url.as_ref())
             .timeout(Duration::from_secs(10))
             .send()
             .await
-            .ok()?
-            .error_for_status()
-            .ok()?;
-        if response.content_length().is_some_and(|n| n > 512 * 1024) {
+        {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(url = %url, error = %error, "封面请求失败");
+                    return None;
+                }
+            },
+            Err(error) => {
+                tracing::warn!(url = %url, error = %error, "封面请求失败");
+                return None;
+            }
+        };
+        let content_length = response.content_length();
+        if content_length.is_some_and(|n| n > MAX_ARTWORK as u64) {
+            tracing::warn!(url = %url, bytes = content_length.unwrap_or(0), limit = MAX_ARTWORK, "封面超过缓存上限");
             return None;
         }
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.ok()?;
-            if bytes.len().saturating_add(chunk.len()) > 512 * 1024 {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    tracing::warn!(url = %url, error = %error, "封面读取失败");
+                    return None;
+                }
+            };
+            if bytes.len().saturating_add(chunk.len()) > MAX_ARTWORK {
+                tracing::warn!(url = %url, limit = MAX_ARTWORK, "封面超过缓存上限");
                 return None;
             }
             bytes.extend_from_slice(&chunk);
         }
+        tracing::debug!(url = %url, bytes = bytes.len(), "封面已获取");
         Some(bytes)
     }
 
@@ -2617,6 +2690,26 @@ fn api_retryable(error: &ApiError) -> bool {
     }
 }
 
+fn resize_cover_url(url: &str) -> Cow<'_, str> {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return Cow::Borrowed(url);
+    };
+    let Some(host) = parsed.host_str() else {
+        return Cow::Borrowed(url);
+    };
+    if host != "music.126.net" && !host.ends_with(".music.126.net") {
+        return Cow::Borrowed(url);
+    }
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key != "param")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.query_pairs_mut().append_pair("param", "1024y1024");
+    Cow::Owned(parsed.to_string())
+}
+
 fn bounded_text(text: &str, limit: usize) -> String {
     let mut end = text.len().min(limit);
     while !text.is_char_boundary(end) {
@@ -2650,6 +2743,81 @@ pub fn plain_lyrics(lrc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_cover_url_requests_1024_for_netease_only() {
+        assert_eq!(
+            resize_cover_url("https://p1.music.126.net/a.jpg").as_ref(),
+            "https://p1.music.126.net/a.jpg?param=1024y1024"
+        );
+        assert_eq!(
+            resize_cover_url("https://p1.music.126.net/a.jpg?x=1").as_ref(),
+            "https://p1.music.126.net/a.jpg?x=1&param=1024y1024"
+        );
+        assert_eq!(
+            resize_cover_url("https://example.com/a.jpg").as_ref(),
+            "https://example.com/a.jpg"
+        );
+        assert_eq!(
+            resize_cover_url("https://p1.music.126.net/a.jpg?param=512y512").as_ref(),
+            "https://p1.music.126.net/a.jpg?param=1024y1024"
+        );
+    }
+
+    fn state(song: Song, source: &str, local_artwork: Option<&str>) -> DaemonState {
+        let mut queue = Queue::new(PlayMode::ListLoop);
+        queue.replace(
+            vec![QueueItem {
+                song,
+                context: None,
+            }],
+            0,
+            PlaySource::none(),
+        );
+        DaemonState {
+            queue,
+            status: PlaybackStatus::Playing,
+            position_ms: 0,
+            duration_ms: 1000,
+            volume: 1.0,
+            error: None,
+            warning: None,
+            auth: AuthState {
+                logged_in: false,
+                profile: None,
+                session_expired: false,
+            },
+            audio_available: true,
+            audio_source: Some(source.into()),
+            actual_quality: None,
+            local_artwork: local_artwork.map(str::to_string),
+            local_only: false,
+            url_refreshed_at_ms: None,
+            desired_paused: false,
+            lyrics: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn playback_uses_local_artwork_only_for_local_source() {
+        let song: Song = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": "title",
+            "cover_url": "https://p1.music.126.net/a.jpg"
+        }))
+        .unwrap();
+        let local = state(song.clone(), "local", Some("file:///art.jpg"));
+        assert_eq!(
+            local.playback().current.unwrap().cover_url.as_deref(),
+            Some("file:///art.jpg")
+        );
+        let network = state(song, "network", None);
+        assert_eq!(
+            network.playback().current.unwrap().cover_url.as_deref(),
+            Some("https://p1.music.126.net/a.jpg")
+        );
+    }
 
     #[tokio::test]
     async fn upgrades_preserve_superior_audio_before_requested_or_server_downgrades() {
